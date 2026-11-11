@@ -1,4 +1,4 @@
-# Windows 桌面版 + 多层路由 + 思考等级 方案
+# Windows 桌面版 + 多层路由方案
 
 > **本文档是 v2 方向变更的根，取代原 v1 的「Linux CLI」形态**
 > 依据：Master 2026-11-11 提出的五条新需求
@@ -14,7 +14,7 @@
 | ② | 切换模式（型号间切 / 供应商间切 / 怎么切）**都要能在图形界面设置** | ✅ 能 | 建 GUI + 策略配置界面 |
 | ③ | 最终适配 **Windows 电脑** | ✅ 能 | **平台变更**：Linux 服务 → Windows 桌面应用 |
 | ④ | GUI 显示：模式(auto/manual)、供应商、当前模型、手动模式下降级会降到哪、当前选择全貌 | ✅ 能 | GUI 要有实时状态推送 |
-| ⑤ | 模型有不同**思考深度/方式**（低/中/高档），聚合能否满足不同 agent 调配**不同思考等级** | ⚠️ **能做，但不能 100% 统一** | 必须做**归一化层 + 能力声明表** |
+| ⑤ | 模型有不同**思考深度/方式** | ❌ **不做** | Master 最终裁决：思考强度不归网关管，交给各家 agent 自己做 |
 
 **两个最大变更**：**平台换 Windows**、**形态换桌面 GUI**。这两条改变技术栈与打包方式。
 
@@ -55,17 +55,18 @@
 │  这一层回答「用哪个 key」                                      │
 │  key1 / key2 / key3（配额、限流、冷却状态各自独立）             │
 │                                                              │
-│      ↓ 正交维度（不在这条链上，是横切的）                       │
-└─ 思考等级 thinking_level ───────────────────────────────────┘
-   off / low / medium / high / max  → 按「供应商+型号」映射成各自参数
+│      ↓                                                       │
+└─────────────────────────────────────────────────────────────┘
 ```
+
+**思考强度不在这个拓扑里** —— 网关不解析、不转换、不降级（见 §三）。
 
 **关键设计**：
 - **`model_family` 是「能力标识」**，不是「API 里的 model 字符串」。
   一个 family 在不同 provider 下可能有不同的实际 model 名（Azure 的 `deployment-name`、
   中转的别名）。
 - **provider 带「能力差异声明」**：同一个 gpt-4o，官方支持 128k 上下文，
-  某中转可能只给 32k；官方支持 `reasoning_effort`，中转可能直接忽略。
+  某中转可能只给 32k，或者不支持某个可选参数。
 
 ## 2.3 数据模型（新增 `model_family` 与 `provider_capability`）
 
@@ -74,10 +75,9 @@
 CREATE TABLE IF NOT EXISTS model_family (
     family          TEXT PRIMARY KEY,      -- "gpt-4o" / "deepseek-chat"
     display_name    TEXT NOT NULL,
-    tier            TEXT,                  -- flagship / standard / lite / reasoning
+    tier            TEXT,                  -- flagship / standard / lite
     generation      INTEGER,               -- 第几代（同家族降级用：5 → 4 → 3.5）
     context_window  INTEGER,               -- 声明值（provider 可能更小，取 min）
-    supports_thinking INTEGER NOT NULL DEFAULT 0,
     created_at      INTEGER NOT NULL
 );
 
@@ -90,7 +90,6 @@ CREATE TABLE IF NOT EXISTS provider_route (
     -- 能力差异（NULL = 沿用 family 声明）
     context_window  INTEGER,               -- 该供应商实际给多少
     max_output      INTEGER,
-    thinking_mode   TEXT,                  -- 见 §三
     supports_stream  INTEGER NOT NULL DEFAULT 1,
     supports_tools   INTEGER NOT NULL DEFAULT 1,
     forward_extra    TEXT,                 -- JSON：该供应商特有但需透传的字段
@@ -106,149 +105,69 @@ CREATE INDEX IF NOT EXISTS idx_provider_route_family ON provider_route(family, p
 
 ---
 
-# 三、⑤ 思考等级：**翻译，不调配**（按 New API / RelayKit 的做法）
+# 三、⑤ 思考强度：**网关完全不做**（最终裁决）
 
-> **2026-11-11 两次修正**：
-> 第一版我设计了「网关按 purpose 猜档位」→ Master 指出该让 agent 自己决定。
-> 第二版我改成「纯透传」→ **纯透传会静默失效**。
-> 第三版看 New API `relaykit/reasoning/`（2,845 行）后才定对：**翻译 + 报告**。
+> **2026-11-11 第三次也是最终裁决**：Master 明确「模型思考深度这个东西让各家 agent 自己去做好吧」，
+> 随后进一步划定边界：「AI 网关接口不需要负责这部分，他只需要破甲，还有聚合以及其他那几样就好，
+> 思考强度这些东西本身就不归他管」。
 
-## 3.0 三条边界的最终定义
+## 3.1 网关的职责边界（写死）
 
-| 谁 | 做什么 | 不做什么 |
+```
+① 破甲    模型拒答时换技术重试
+② 聚合    多供应商 / 多型号 / 多账号，统一一个入口
+③ 路由    三层寻址 + 三维降级（账号 / 供应商 / 型号）
+④ 说清    每次响应告诉你用了谁（模式 + requested + actual + 为什么）
+```
+
+**思考强度不在这四条里。** 网关对它：**不解析、不翻译、不校验、不设约束、不报告**。
+
+## 3.2 为什么这样划（三轮讨论的结论）
+
+| 轮次 | 我提的方案 | 问题 |
 |---|---|---|
-| **Agent** | 决定「我要多少思考」（用原生参数，或模型名后缀） | 不用管上游是谁、参数叫什么 |
-| **网关** | 把 agent 的表达**翻译**成目标上游能懂的参数；**翻译了什么、丢了什么全部报告** | **不替 agent 决定思考深度**；不按「用途」猜档位 |
-| 上游 | 按自己协议的参数执行 | — |
+| 一 | 网关按 `purpose` 猜档位（code_gen→medium） | **外行替内行决策**。不同 agent 适配不同模型，各自最清楚这一步要不要深想 |
+| 二 | 纯透传，网关完全不碰 | 我担心「跨协议时参数被静默丢弃」 |
+| 三 | 协议亲和路由（auto 不跨协议）+ 翻译报告 | **过度设计**。这是把 agent 的责任揽到网关身上 |
+| **最终** | **网关完全不做** | Master 裁决 |
 
-**为什么不能纯透传**：agent 按 Claude 格式发 `thinking: {budget_tokens: 16384}`，
-路由到 OpenAI 的 gpt-4o → 该字段被静默忽略 → **agent 以为在用高档思考，实际是默认档**。
-既不报错也没提示。**这是网关能犯的静默欺骗之一，必须由网关负责翻译。**
+**最终理由**：**思考强度是 agent 与上游之间的协议细节，不是网关的职责。**
+网关既不知道 agent 为什么设这个值，也不该替它保证。**agent 要保证自己的参数有效，
+正确做法是锁定能听懂该参数的模型（manual 模式），而不是指望网关替它把关。**
 
-## 3.1 七档统一口径（不是 5 档）
+## 3.3 连带的两个删除
 
-```python
-Effort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]
-```
+### 删掉「协议亲和约束」
 
-这七档**不是我发明的**，是从 New API `reasoning/intent.go` 的常量照抄：
+原本我设计了「auto 路由时把候选集限制在与接入协议相同的上游」—— **删除**。
+理由：那仍然是在「替 agent 保证思考参数有效」，属于把别人的责任揽过来。
 
-```go
-EffortNone / EffortMinimal / EffortLow / EffortMedium / EffortHigh / EffortXHigh / EffortMax
-```
-
-`xhigh` 是「比 high 更强但还不到 max」的档，实际有上游能兑现（不是凑数档）。
-
-## 3.2 核心抽象：`Intent` 对象，不是静态映射表
-
-**静态映射表（我第一版的设计）在多跳转换时每跳都丢精度**。New API 用「意图对象 + 双向 apply」：
+**后果（如实写进文档，不隐瞒）**：
 
 ```
-           ┌── FromOpenAIChat()      ─┐
-输入（四选一）├── FromOpenAIResponses() ─┤   Intent（跨协议中间表达，带精确 budget 数值）
-           ├── FromClaude()          ─┤        │
-           └── FromGemini()          ─┘        ├──→ ApplyToOpenAIChat()
-                                               ├──→ ApplyToOpenAIResponses()
-                                               ├──→ Claude 的 max_tokens/budget 调整
-                                               └──→ Gemini 的 thinkingConfig 归一化
+agent 用 Claude 格式发请求（含 thinking.budget_tokens）
+     ↓ auto 路由跨协议选到 OpenAI 的 gpt-4o
+thinking.budget_tokens 被 OpenAI 忽略
+     ↓
+agent 以为在用高档思考，实际是默认档
 ```
 
-**`Intent` 要带的不只是「档位名」，还有精确数值**：
-- `effort`: 七档之一
-- `budget_tokens`: 精确 token 数（Claude/Gemini 用）
-- `include_thoughts`: 是否回传思考内容
-- `source`: 这个意图从哪个协议解析出来的（诊断用）
+**这是 agent 侧的责任**。文档里明确写：**要保证思考参数生效，请用 manual 模式锁定模型**。
+网关通过响应头 `X-Gateway-Route-Actual` 告诉它实际用了谁，剩下的判断交给 agent。
 
-**为什么必须带数值**：Claude 的 `budget_tokens: 16384` 转成 OpenAI 的 `effort` 会丢精度，
-再转回 Gemini 的 `budget` 就还原不回 16384 了。带原值才能在「圆了一圈」的场景下保真。
+### 删掉「思考降级」维度
 
-## 3.3 agent 的三种表达方式（按优先级）
+三维降级（账号 / 供应商 / 型号 / 思考）→ **三维**（账号 / 供应商 / 型号）。
 
-### ① 模型名后缀（最简，推荐给 agent 用）
+**理由**：降级思考档 = 网关替 agent 决定「少想一点」，属于同一类越界。
 
-**agent 不用记各家参数格式**，直接在模型名后加后缀：
+## 3.4 保留的一句话提醒（放 README 和 GUI 里）
 
-```
-gpt-5-high            → gpt-5  + reasoning_effort=high
-claude-opus-4-max     → claude + budget_tokens=最大
-deepseek-v4-low       → deepseek + effort=low
-gemini-3-pro-xhigh    → gemini + thinkingConfig 最高档
-```
+> **网关不处理思考强度。** 你在请求里带的 `reasoning_effort` / `thinking.budget_tokens` /
+> `thinkingConfig` 等参数会**原样透传**给上游。要保证它们生效，请用 **manual 模式锁定模型**；
+> **auto 模式可能把你路由到不支持该参数的模型上**，此时参数会被上游忽略（网关不报错也不拦截）。
 
-**各家的后缀集合不同**（这是实测，不是统一列表）：
-
-```go
-EffortSuffixes           = ["-max","-xhigh","-high","-medium","-low","-minimal"]
-OpenAIEffortSuffixes     = ["-max","-xhigh","-high","-medium","-low","-minimal","-none"]
-DeepSeekV4EffortSuffixes = ["-none","-low","-max"]        // DeepSeek 只有三档
-```
-
-**为什么这个设计对 agent 最友好**：agent 只需要会说「high」，不需要知道
-OpenAI 叫 `reasoning_effort`、Claude 叫 `budget_tokens`、Qwen 叫 `enable_thinking`。
-
-### ② 原生参数（agent 自己知道协议时用）
-
-```json
-// OpenAI 格式
-{"model": "gpt-5", "reasoning_effort": "high"}
-
-// Claude 格式
-{"model": "claude-opus-4", "thinking": {"type": "enabled", "budget_tokens": 16384}}
-
-// Gemini 格式
-{"model": "gemini-3-pro", "generationConfig": {"thinkingConfig": {"thinkingBudget": 24576}}}
-```
-
-网关原样解析成 `Intent`。
-
-### ③ 两者都有 → `MergeExplicitAndSuffix`
-
-**冲突规则**（照抄 New API `MergeExplicitAndSuffix`）：显式参数优先，后缀作为补充；
-冲突时返回诊断 `explicit_overrides_suffix`，不静默改。
-
-## 3.4 「不同模型分类不一样」怎么处理
-
-**处理方式从「映射表」改为「三个 apply 函数各自适配」**：
-
-| 上游 | 适配逻辑（New API 实测） |
-|---|---|
-| **OpenAI** | 直接吃 `reasoning_effort`（七档里 `none`/`minimal` 部分模型不支持 → 降级并诊断） |
-| **Claude** | `budget_tokens` **超出模型范围自动调小**，返回诊断 `claude_budget_adjusted`；`max_tokens` 不够时自动抬高，返回 `claude_max_tokens_raised` |
-| **Gemini** | `thinkingConfig` **按模型归一化**（2.5 用 budget / 3+ 用 level，两套不兼容） |
-| **Qwen 等只有开关的** | `enable_thinking: true/false`，`effort` 精细度丢失 → 诊断 `effort_collapsed_to_boolean` |
-| **不支持思考的模型** | 忽略该参数 → 诊断 `reasoning_not_supported`，**响应里明确标出，不假装生效** |
-
-**共同点：所有「做不到完全匹配」的地方，都以诊断返回，不静默吞掉。**
-
-## 3.5 七档 × 上游的兑现表（哪些档实际能兑现）
-
-| 上游 | none | minimal | low | medium | high | xhigh | max |
-|---|---|---|---|---|---|---|---|
-| OpenAI o/GPT-5 | 部分 | ✅ | ✅ | ✅ | ✅ | ❌降 high | ❌降 high |
-| Claude ≤4.6 | ✅关 | ✅1024 | ✅1024 | ✅4096 | ✅16384 | ~24576 | ✅32000 |
-| Claude 4.7+ | ✅关 | ? | ✅ | ✅ | ✅ | ? | ~ |
-| Gemini 2.5 | ✅0 | ✅1024 | ✅1024 | ✅8192 | ✅24576 | ~ | ✅32768 |
-| Gemini 3+ | ✅off | ? | ✅ | ✅ | ✅ | ? | ~ |
-| Qwen | ✅false | ⚠️true | ⚠️true | ⚠️true | ⚠️true | ⚠️true | ⚠️true |
-
-`~` = 需实测确认（**本文档不假装知道**）；`⚠️` = 退化成二值。
-
-**这张表的意义**：agent 要 `xhigh`，路由到的上游没有这档 → 降级兑现 + 诊断，
-**而不是假装给了 xhigh**。
-
-## 3.6 实现范围（首版）
-
-| 项 | 首版做 | 后续 |
-|---|---|---|
-| `Intent` 对象 + 七档 | ✅ | |
-| `From{OpenAI Chat, OpenAI Responses, Claude, Gemini}` | ✅ 四种 | |
-| `Apply{OpenAI Chat, OpenAI Responses, Claude, Gemini}` | ✅ 四种 | |
-| 模型名后缀解析（支持各家不同后缀集） | ✅ | |
-| `MergeExplicitAndSuffix` | ✅ | |
-| 诊断码（`claude_budget_adjusted` 等） | ✅ | |
-| 多跳路径的 Intent 透传 | ✅（Claude↔Gemini 走两跳） | |
-
-**这就是 `relaykit/reasoning/` 的 Python 重写**（Go 2,845 行含测试，纯实现约 1,800 行）。
+**这一句是诚实交代，不是功能。** 用户知道边界在哪，比网关替它瞎猜要强。
 
 
 # 三·五、接口协议支持矩阵（Master 要求：覆盖市面主流协议）
@@ -319,9 +238,6 @@ New API 支持的上游，按协议族分类：
 |---|---|
 | `claude_budget_adjusted` | Claude 的 `budget_tokens` 超出模型范围被调整 |
 | `claude_max_tokens_raised` | `max_tokens` 不够容纳 budget 被抬高 |
-| `effort_collapsed_to_boolean` | 目标只支持开关，七档精细度丢失 |
-| `effort_downgraded_unsupported` | 目标没有该档（如 OpenAI 无 `xhigh`）→ 降级兑现 |
-| `reasoning_not_supported` | 目标完全不支持思考参数 → 忽略 |
 | `field_dropped_on_hop` | 多跳转换中某个独有字段无法表达 |
 | `tool_reencoded` | 工具定义按目标协议重新编码（如 Responses 的 custom tool → function tool） |
 | `image_url_fetch_required` | 需要宿主下载 URL 才能转多模态 |
@@ -346,28 +262,34 @@ X-Gateway-Conversion: quality=fair,steps=2,diagnostics=claude_budget_adjusted,fi
 | 诊断码 | ✅ | 不报告丢字段等于骗人 |
 | 8 个上游 + advanced_custom | ✅ | 覆盖 4 协议族 + 长尾可配 |
 
-**约 1,800~2,200 行 Python**（对应 RelayKit 的 Go 实现 3,600 行左右，去掉 Go 特有样板）。
+**约 600~800 行 Python**。
+
+> **不含 RelayKit 的 `relayconvert/reasoning/`（Go 2,845 行）。** 那一整块做的是
+> 思考等级的跨协议翻译（Intent 对象、七档映射、模型名后缀、诊断码），**网关不做**（见 §三）。
+> 这是本项目最大的一笔减法。
+
+**转换时遇到不认识的字段（含思考参数）→ 原样透传给上游，不解析不改写。**
+上游认就生效，不认就忽略 —— **网关不代它判断，也不报告**（这是 §3.3 的边界）。
 
 **这是本项目最大的一块工作量** —— 比破甲层（1,981 行）还大。
 
-# 四、② 四维切换策略（GUI 可配）
+# 四、② 三维切换策略（GUI 可配）
 
-## 4.1 四个独立的切换维度
+## 4.1 三个独立的切换维度
 
 | 维度 | 触发 | 动作 | 例子 |
 |---|---|---|---|
 | **A 账号轮巡** | 配额耗尽 / 限流 / 该 key 冷却 | 同 provider 换 key | `openai:key1` → `openai:key2` |
 | **B 供应商切换** | 整个 provider 不可用 | 同 family 换 provider | `openai-official` → `azure` → `relay-a` |
 | **C 型号降级** | 同 family 所有 provider 都挂 | 换成更低一代/更小的型号 | `gpt-5` → `gpt-4o` → `gpt-4o-mini` |
-| **D 思考降级** | 超时 / 预算不足 / 显式配置 | 降低思考档 | `high` → `medium` → `low` |
 
 ## 4.2 关键：**顺序可配**（这是 Master ② 的核心要求）
 
 ```toml
 [fallback]
-# 四个维度的尝试顺序（从左到右）
-order = ["account", "provider", "thinking", "model"]
-#            ↑ A          ↑ B         ↑ D          ↑ C
+# 三个维度的尝试顺序（从左到右）
+order = ["account", "provider", "model"]
+#            ↑ A          ↑ B         ↑ C
 
 # 每一维的开关
 [fallback.account]
@@ -377,10 +299,6 @@ max_attempts = 3          # 最多换 3 个 key
 [fallback.provider]
 enabled = true
 max_attempts = 2          # 最多换 2 家
-
-[fallback.thinking]
-enabled = true
-ladder = ["high", "medium", "low"]   # 只在超时/预算触发时降
 
 [fallback.model]
 enabled = true
@@ -393,10 +311,10 @@ chain = ["gpt-5", "gpt-4o", "gpt-4o-mini"]
 
 ```toml
 # 配置甲：质量优先（先换账号/家，最后才降能力）
-order = ["account", "provider", "model", "thinking"]
+order = ["account", "provider", "model"]
 
-# 配置乙：省钱优先（先降思考，再换号）
-order = ["thinking", "account", "provider", "model"]
+# 配置乙：便宜优先（先换便宜供应商，再降型号）
+order = ["provider", "account", "model"]
 ```
 
 **为什么必须可配**：这两个顺序的语义完全不同 ——
@@ -410,8 +328,7 @@ order = ["thinking", "account", "provider", "model"]
   1. [账号轮巡]  ≡      最多 3 次
   2. [供应商切换] ≡     最多 2 家
   3. [型号降级]  ≡      链: gpt-5 → gpt-4o → gpt-4o-mini  [编辑]
-  4. [思考降级]  ≡      链: high → medium → low          [编辑]
-     ☑ 账号轮巡  ☑ 供应商切换  ☑ 型号降级  ☑ 思考降级
+     ☑ 账号轮巡  ☑ 供应商切换  ☑ 型号降级
 
 预设: [质量优先] [省钱优先] [自己配]
 ```
@@ -445,7 +362,6 @@ order = ["thinking", "account", "provider", "model"]
 │ ┌──────────────────────────┬────────────────────────────────────┐│
 │ │ 模式      AUTO（自动）    │ 供应商   DeepSeek 官方              ││
 │ │ 型号      deepseek-chat   │ 账号     key1（额度 ∞）             ││
-│ │ 思考等级  中 medium       │ 实际参数 reasoning_effort=medium    ││
 │ │ 延迟      320 ms          │ 本次花费 $0.0004                    ││
 │ ├──────────────────────────┴────────────────────────────────────┤│
 │ │ 降级链（手动模式下"会降到哪"也在这里显示）                        ││
@@ -454,14 +370,14 @@ order = ["thinking", "account", "provider", "model"]
 │ └───────────────────────────────────────────────────────────────┘│
 ├──────────────────────────────────────────────────────────────────┤
 │ 路由表                                        [筛选: 全部型号 ▾]  │
-│ 型号            供应商   账号  思考  健康  配额   延迟  操作       │
-│ deepseek-chat   官方     key1  中    ●正常  ∞     320ms [停用]    │
-│ deepseek-chat   官方     key2  中    ●正常  ∞     350ms [停用]    │
-│ deepseek-chat   中转A    key1  中    ▲冷却  ∞     890ms [启用]    │
-│ deepseek-flash  官方     key1  低    ●正常  ∞     180ms [停用]    │
-│ gpt-5           官方     key1  高    ✕无key —      —    [配置]    │
+│ 型号            供应商   账号  健康  配额   延迟  操作           │
+│ deepseek-chat   官方     key1  ●正常  ∞     320ms [停用]        │
+│ deepseek-chat   官方     key2  ●正常  ∞     350ms [停用]        │
+│ deepseek-chat   中转A    key1  ▲冷却  ∞     890ms [启用]        │
+│ deepseek-flash  官方     key1  ●正常  ∞     180ms [停用]        │
+│ gpt-5           官方     key1  ✕无key —      —    [配置]          │
 ├──────────────────────────────────────────────────────────────────┤
-│ [切换策略] [思考映射] [预算] [破甲] [请求日志] [设置]              │
+│ [切换策略] [总预算] [破甲] [请求日志] [设置]                       │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -520,11 +436,11 @@ pyinstaller --onefile --windowed --name AIGateway \
 
 | 文档 | 影响 |
 |---|---|
-| `AI网关-最终方案.md` | **大改**：五层 → 五层+GUI层；路由层从两层→四层寻址；新增思考等级章；平台从 Linux→Windows |
+| `AI网关-最终方案.md` | **大改**：加 GUI 层；路由层从两层→四层寻址；平台从 Linux→Windows |
 | `docs/架构设计.md` | 技术栈加 PySide6 + qasync；目录结构加 `gui/` |
-| `docs/数据模型与配置.md` | 加 `model_family` / `provider_route` / `thinking_map`；配置加 `[fallback]` / `[thinking]` |
-| `docs/落地总表.md` | **新增 3 批**：G7.5 思考等级、G11 GUI、G12 Windows 打包 |
-| `docs/测试策略.md` | 加思考映射测试（每协议 5 档）+ GUI 冒烟测试 |
+| `docs/数据模型与配置.md` | 加 `model_family` / `provider_route`；配置加 `[fallback]` |
+| `docs/落地总表.md` | **新增 3 批**：G7.5 协议转换、G11 GUI、G12 Windows 打包 |
+| `docs/测试策略.md` | 加协议转换矩阵测试（12 个方向）+ GUI 冒烟测试 |
 | `docs/借鉴分析.md` | 不变（借鉴点与 GUI 无关） |
 
 ---
@@ -534,11 +450,11 @@ pyinstaller --onefile --windowed --name AIGateway \
 | # | 问题 | 我的推荐 |
 |---|---|---|
 | **1** | GUI 技术栈用 **PySide6**？还是你更想要 Tauri/Web 那种好看的？（代价：后端要改成子进程） | **PySide6**（后端零重写） |
-| **2** | 统一思考档位定 **5 档**（off/low/medium/high/max）够不够？还是你要 3 档（简单）或 7 档（更细） | **5 档** |
-| **3** | 型号降级链要**自动推断**（按 generation 数字）还是**手工配置**？ | **手工配**（自动猜会出错，如 `gpt-4o-mini` 和 `gpt-4.1` 谁更弱不好判断） |
-| **4** | 默认切换顺序：**质量优先**（先换号换家、最后降型号）还是**省钱优先** | **质量优先** |
-| **5** | Windows 版本要求（Win10 / Win11 / 都要）？要不要同时保留 Linux 版 | 都是；**保留 Linux**（代码不变，只多一个打包目标） |
+| **2** | 型号降级链要**自动推断**（按 generation 数字）还是**手工配置**？ | **手工配**（自动猜会出错，如 `gpt-4o-mini` 和 `gpt-4.1` 谁更弱不好判断） |
+| **3** | 默认切换顺序：**质量优先**（先换号换家、最后降型号）还是**省钱优先** | **质量优先** |
+| **4** | Windows 版本要求（Win10 / Win11 / 都要）？要不要同时保留 Linux 版 | 都是；**保留 Linux**（代码不变，只多一个打包目标） |
 
 ---
 
-*建立时间：2026-11-11 ｜ 各家思考参数来自官方文档实测，非记忆*
+*建立时间：2026-11-11 ｜ 协议矩阵与上游清单来自 New API 源码实测，非记忆*
+*思考强度整块不做 —— Master 最终裁决，见 §三*
