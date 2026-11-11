@@ -10,9 +10,9 @@
 # 目录
 
 - [一、项目定位](#一项目定位)
-- [二、要解决的四个问题](#二要解决的四个问题)
+- [二、要解决的三个问题](#二要解决的三个问题)
 - [三、技术栈决策](#三技术栈决策)
-- [四、六层架构](#四六层架构)
+- [四、五层架构](#四五层架构)
 - [五、各层详细设计](#五各层详细设计)
 - [六、数据模型](#六数据模型)
 - [七、配置格式](#七配置格式)
@@ -28,26 +28,26 @@
 
 # 一、项目定位
 
-**一个自用的本地 AI 网关**：统一入口 + 自动破甲 + token 压缩 + 智能路由 + 多账号熔断。
+**一个自用的本地 AI 网关**：统一入口 + 自动破甲 + 智能路由 + 多账号熔断。
 
 **核心价值**：把所有 AI 客户端（Claude Code / Cursor / 自己的脚本）收到一个入口，
 在网关这一层统一做四件事——
 
 1. **破甲**：模型拒答时自动换技术，而不是把「我不能协助」原样返回给用户
-2. **压缩**：长 prompt 压 token，省成本
-3. **路由**：多 provider / 多账号自动选，谁挂了自动切
-4. **可解释**：每次请求都能回答「为什么走了这条路由」「破甲用的是哪个技术」
+2. **路由**：多 provider / 多账号自动选，谁挂了自动切
+3. **可解释**：每次请求都能回答「为什么走了这条路由」「破甲用的是哪个技术」
 
-**不是**：对外服务、多租户计费、又一个管理后台。**自用单机**。
+**明确不做**：上下文压缩（理由见 §5.3 —— agent 自带，网关再压是双重有损）。
+
+**不是**：对外服务、多租户计费、又一个管理后台、上下文压缩中间层。**自用单机**。
 
 ---
 
-# 二、要解决的四个问题
+# 二、要解决的三个问题
 
 | 问题 | 现状 | 解法 | 借自 |
 |---|---|---|---|
 | **模型动不动拒答** | 问安全相关的问题，模型回「我不能协助」 | **破甲层 4 级阶梯**：L0 身份锚定 → L1 规则变形（25 种）→ L2 模板（22 条）→ L3 LLM 重写 → L4 迭代搜索 | KXNS `soul/jailbreak/`（981 行）+ **EasyJailbreak（39 技术 / 237 模板）** + **garak（detectors）** |
-| **prompt 太长烧 token** | 长上下文一次几万 token | **压缩层**：caveman / ponytail + autodetect（值不值得压）+ headroom（预算紧不紧） | 9router `open-sse/rtk/` |
 | **多账号、谁挂了不知道** | 手动换 key，不知道哪家挂了 | **路由层**：健康租约 + 失败分类（**配额耗尽 ≠ 服务故障**）+ rank_targets | freellmpool `router.py`（1,627 行）+ one-api 能力表 |
 | **各家 API 字段不一样** | 每家都要单独适配 | **转发层**：统一 `Adaptor` 接口 + 5 家适配器 | one-api `relay/adaptor/`（38 家） |
 
@@ -90,7 +90,7 @@
 
 ---
 
-# 四、六层架构
+# 四、五层架构
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -105,9 +105,7 @@
 │ ② 破甲层  L0 身份 → L1 规则变形 → L2 模板 → L3 重写 → L4 搜索 │
 └───────────────────────┬─────────────────────────────────────┘
                         ↓
-┌─────────────────────────────────────────────────────────────┐
-│ ③ 压缩层  RTK 策略注册表 + autodetect + headroom              │
-└───────────────────────┬─────────────────────────────────────┘
+（原 ③ 压缩层 —— 已删除，见 §5.3）
                         ↓
 ┌─────────────────────────────────────────────────────────────┐
 │ ④ 路由层  健康租约 + 失败分类 + rank_targets + 能力表          │
@@ -124,7 +122,6 @@
 |---|---|---|
 | ⓪ 模式层 | 决定「谁来选路由」 | 不改请求内容 |
 | ② 破甲层 | 改 prompt 措辞 / 编码 | **不改路由决策**；**不参与也不削弱授权判定** |
-| ③ 压缩层 | 压 token | 不改语义 |
 | ④ 路由层 | 选目标 | 不改协议 |
 | ⑤ 转发层 | 字段映射 | 不管健康（失败上抛） |
 
@@ -306,280 +303,47 @@ EasyJailbreak 是**评估工具**（回答「这模型多脆弱」），
 
 ---
 
-## 5.3 ③ 压缩层
+## 5.3 ③ 压缩层：**已删除**（决策记录）
 
-### 策略注册表
+> **决策时间**：2026-11-11
+> **决策依据**：Master 指出「压缩没必要交给网关做，因为大多数 agent 智能体都会去做上下文压缩，
+> 如果网关还在做一遍的话，可能会导致内容的质量下降，可能会导致一些细节上的把控会变差」。
+>
+> **结论：整层删除。** 三条理由记下来，防止以后又「人家 9router 都有」加回来。
 
-```python
-STRATEGIES = {
-    "off":      lambda m: m,
-    "caveman":  caveman_filter,      # 砍冗余措辞（"请帮我" → 删）
-    "ponytail": ponytail_filter,     # 砍结构（合并重复上下文）
-    "auto":     auto_select,         # 按 autodetect + headroom 选
-}
-```
+### 为什么必须删
 
-### 三个关键决策（抄 9router 的真机制，不是无脑压）
+**① 有损操作必须有唯一的负责人**
 
-| 机制 | 规则 | 为什么 |
-|---|---|---|
-| **autodetect** | 短 prompt（< 800 token）不压 | 压了反而更差，且省不了多少 |
-| **headroom** | 预算余量充足（< 80%）时不压 | 保质量优先，快超预算才压 |
-| **可 A/B** | 记录「压前/压后 token 数 + 上游是否拒答」 | 9router 只说省 20-40% 但没做 A/B |
+压缩是有损的。Agent 知道自己的对话结构 —— 哪段是用户精心给的关键上下文、哪段是可重取的
+tool 结果、哪段丢了就要重跑。网关只看到一个 `messages` 数组，**不知道哪段不可恢复**，
+只能按通用规则压。**压掉的很可能正是 agent 特意保留的细节。**
 
-### 我们比 9router 多做的：压缩效果归因
+**② 双重有损无法归因**
 
-每次压缩落一行：
+Agent 压一次已经损失，网关再压一次 —— 出问题时**分不清是 agent 压坏了还是网关压坏了**。
+两个有损层叠加，故障定位变成不可能。
 
-```json
-{"req_id": "...", "strategy": "caveman", "tokens_before": 3200, "tokens_after": 2100,
- "saved_pct": 34.4, "upstream_ok": true, "refusal": false}
-```
+**③ 9router 的 RTK 场景和我们根本不同**
 
-这样才能回答「caveman 在哪些请求上省得多、在哪些上会导致拒答」。
+9router 是「人在 Dashboard 里聊天，context 由它自己管」。我们下面挂的是 Claude Code / Cursor，
+**它们有完整的 context 管理**。照搬它的卖点，等于在别人已经管好的地方再插一手。
 
----
+### 保留：token 计量（只记账，不压缩）
 
-## 5.4 ④ 路由层
+- `request_log` 记 `prompt_tokens` / `completion_tokens`（**上游返回的 usage 原样记录**）
+- **不引入** `tiktoken` 之类本地分词依赖（那是为压缩服务的）
+- 归 G6 可观测层，不单独立层
 
-### 核心机制（照抄 freellmpool）
+### 连带删掉的东西
 
-| 机制 | 做法 | 为什么重要 |
-|---|---|---|
-| **健康租约** | `_acquire_route` / `_record_route_success` / `_record_route_failure` / `_refresh_route_lease` | 防同一死路由被多个请求同时打 |
-| **失败分类** | `_is_health_failure` / `_health_failure_class` / `_is_account_quota_exhaustion` | **最有价值的一条：配额耗尽 → 换号；服务故障 → 换 provider** |
-| **目标排序** | `rank_targets`（健康度 + 配额 + 延迟） | 综合打分，不是「按优先级列表硬试」 |
-| **冷却** | `_mark_cooldown` + `cooldown_snapshot` | 连续失败进冷却，不无限重试 |
-| **第一波分离** | `_provider_first_wave` | 先打主力池，失败才降免费池 |
-| **能力表** | （借 one-api `model/ability.go`） | 「哪个渠道能服务哪个模型」查表，不硬编码 |
-
-### 我们的排序公式（加成本维度）
-
-```
-score = w_health*health + w_quota*remaining_quota
-      + w_latency*(1/latency) + w_cost*(1/cost)
-```
-
-**默认 `w_cost = 0`**（不偷偷省钱），开 `--prefer-cheap` 才生效。
-
-### 最关键的三条测试（保证「换 key 还是换家」不出错）
-
-```python
-def test_配额耗尽只跳过该账号不跳过整个provider():
-    pool = Pool([("openai","key1"), ("openai","key2")])
-    pool.mark_quota_exhausted("openai", "key1")
-    candidates = pool.candidates("gpt-4o")
-    assert ("openai","key1") not in candidates
-    assert ("openai","key2") in candidates      # ★ 同 provider 其他账号仍可用
-
-def test_服务故障才跳过整个provider():
-    pool = Pool([("openai","key1"), ("openai","key2")])
-    pool.mark_down("openai")
-    assert pool.candidates("gpt-4o") == []
-
-def test_连续失败N次进冷却():
-    pool = Pool([("openai","key1")])
-    for _ in range(3):
-        pool.record_failure("openai:key1", is_health_failure=True)
-    assert pool.is_cooling("openai:key1") is True
-```
-
----
-
-## 5.5 ⑤ 转发层
-
-### 统一接口（抄 one-api `relay/adaptor/interface.go`）
-
-```python
-class Adaptor(ABC):
-    @abstractmethod
-    def transform_request(self, req: ChatRequest) -> dict: ...
-
-    @abstractmethod
-    def transform_response(self, raw: dict) -> ChatResponse: ...
-
-    @abstractmethod
-    async def chat(self, req: ChatRequest) -> ChatResponse: ...
-
-    @abstractmethod
-    async def stream(self, req: ChatRequest) -> AsyncIterator[ChatChunk]: ...
-
-    @abstractmethod
-    def models(self) -> list[str]: ...
-```
-
-### 首版 5 家
-
-OpenAI / Anthropic / DeepSeek / Gemini / 国内聚合（one-api 自建）
-
-**为什么先 5 家不 38 家**：38 家是「字段映射」的体力活，不阻塞架构验证。
-先把 5 家跑通、`route_trace` 和破甲验证有效，再加是最省时间的顺序。
-
-### 关键：`ProviderError` 必须带两个布尔标记
-
-```python
-class ProviderError(Exception):
-    is_health_failure: bool      # 服务故障（换 provider）
-    is_quota_exhausted: bool     # 配额耗尽（换账号）
-```
-
-这是路由层做失败分类的**唯一输入**。
-
----
-
-# 六、数据模型
-
-SQLite（WAL 模式）。运行数据不入 git。
-
-## 6.1 `route_state` —— 路由健康状态
-
-```sql
-CREATE TABLE IF NOT EXISTS route_state (
-    route_id      TEXT PRIMARY KEY,      -- "openai:key1/gpt-4o"
-    provider      TEXT NOT NULL,
-    account       TEXT,                  -- 只存 key_id，不存 key 本体
-    model         TEXT NOT NULL,
-    success_count INTEGER NOT NULL DEFAULT 0,
-    fail_count    INTEGER NOT NULL DEFAULT 0,
-    consecutive_fail INTEGER NOT NULL DEFAULT 0,
-    lease_owner   TEXT,                  -- 请求 id
-    lease_until   INTEGER,               -- epoch ms
-    cooldown_until INTEGER NOT NULL DEFAULT 0,
-    quota_state   TEXT NOT NULL DEFAULT 'ok',   -- ok | exhausted
-    quota_until   INTEGER NOT NULL DEFAULT 0,
-    last_ok_at    INTEGER,
-    last_fail_at  INTEGER,
-    updated_at    INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_route_state_cool ON route_state(cooldown_until);
-```
-
-**为什么合成一张表**：避免「租约在 A 表、健康在 B 表」导致并发时读到不一致状态。
-
-## 6.2 `attempt_log` —— 每次破甲尝试
-
-```sql
-CREATE TABLE IF NOT EXISTS attempt_log (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    request_id    TEXT NOT NULL,
-    model         TEXT NOT NULL,
-    level         INTEGER NOT NULL,      -- 0~4
-    technique     TEXT NOT NULL,         -- "rot13" / "deepinception" / "identity"
-    ok            INTEGER NOT NULL,
-    refusal_kind  TEXT,                  -- phrase|structure|model|judge|partial
-    latency_ms    INTEGER NOT NULL,
-    ts            INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_attempt_model_tech ON attempt_log(model, technique);
-```
-
-**「模型 × 技术 成功率矩阵」的数据来源**：
-
-```sql
-SELECT model, technique,
-       SUM(ok) * 1.0 / COUNT(*) AS success_rate,
-       COUNT(*) AS n
-FROM attempt_log
-WHERE ts > ?
-GROUP BY model, technique
-HAVING n >= 5          -- 样本太少不给结论
-ORDER BY success_rate DESC;
-```
-
-**为什么 `HAVING n >= 5`**：1/1 的 100% 没有统计意义，拿它排序会让新技术的偶然成功误导策略。
-
-## 6.3 `request_log` —— 每次请求一行
-
-```sql
-CREATE TABLE IF NOT EXISTS request_log (
-    request_id    TEXT PRIMARY KEY,
-    mode          TEXT NOT NULL,         -- auto | manual
-    route_id      TEXT,
-    model         TEXT,
-    provider      TEXT,
-    jailbreak_level INTEGER NOT NULL DEFAULT 0,
-    jailbreak_technique TEXT,
-    jailbreak_attempts INTEGER NOT NULL DEFAULT 0,
-    compress_strategy TEXT,
-    tokens_before INTEGER,
-    tokens_after  INTEGER,
-    ok            INTEGER NOT NULL,
-    error_kind    TEXT,
-    latency_ms    INTEGER NOT NULL,
-    trace_json    TEXT,                  -- RouteTrace，可回放
-    ts            INTEGER NOT NULL
-);
-```
-
-## 6.4 `technique_prior` —— 技术先验（聚合缓存）
-
-```sql
-CREATE TABLE IF NOT EXISTS technique_prior (
-    model       TEXT NOT NULL,
-    technique   TEXT NOT NULL,
-    success_rate REAL NOT NULL,
-    n           INTEGER NOT NULL,
-    updated_at  INTEGER NOT NULL,
-    PRIMARY KEY (model, technique)
-);
-```
-
-`attempt_log` 是**明细**（append-only 不删），`technique_prior` 是**聚合缓存**（定期重算）。
-
----
-
-# 七、配置格式
-
-`config.toml`（不入 git）。
-
-```toml
-[server]
-host = "127.0.0.1"          # 默认只监听本地
-port = 8787
-
-[storage]
-db_path = "./data/gateway.db"
-
-[mode]
-default = "auto"            # auto | manual
-
-[route]
-w_health  = 0.5
-w_quota   = 0.3
-w_latency = 0.2
-w_cost    = 0.0             # 0 = 不偷偷省钱
-cooldown_after_fails = 3
-cooldown_seconds     = 300
-lease_seconds        = 30
-
-[jailbreak]
-enabled     = true          # 默认开
-start_level = 1             # 直接进 L1（L0 总是先加）
-max_level   = 2             # 默认到 L2；3/4 需显式开
-ladder_timeout_ms = 12000
-
-[l3]
-enabled  = true
-only_if = ["empty_response", "hard_refusal"]
-
-[l4]
-enabled       = false       # PAIR/TAP 默认关闭
-budget_ms     = 30000
-max_attempts  = 8
-
-[refusal]
-head_chars   = 200
-use_model    = true         # 启用 garak 的 ModernBERTRefusal（需装 transformers）
-extra_phrases = []
-
-[compress]
-default  = "auto"
-min_prompt_tokens = 800
-
-[compress.headroom]
-enabled        = true
-budget_tokens  = 8000
-compress_above = 0.8
+| 删掉 | 原本要做什么 |
+|---|---|
+| `compress/` 五个文件 | registry / caveman / ponytail / autodetect / headroom |
+| G5 整个批次 | 5 个源文件 + 8 条测试 |
+| `X-Gateway-Compress` 请求头 | 单请求选择压缩策略 |
+| `X-Gateway-Compress-Trace` 响应头 | 报告压缩效果 |
+| `# （原 [compress] 配置段已删除 —— 压缩层不做）
 
 [auth]
 gateway_keys = []           # 空 = 不鉴权（仅 127.0.0.1 安全）
@@ -620,7 +384,7 @@ enabled = false
 
 ## `POST /v1/chat/completions`（OpenAI 兼容）
 
-**请求**：标准 OpenAI 格式 + 五个私有头
+**请求**：标准 OpenAI 格式 + 四个私有头
 
 ```http
 POST /v1/chat/completions
@@ -629,7 +393,6 @@ X-Gateway-Mode: auto
 X-Gateway-Route: openai/gpt-4o          (仅 manual)
 X-Gateway-Fallback: strict
 X-Gateway-Jailbreak: auto
-X-Gateway-Compress: auto
 ```
 
 **为什么用请求头不用 body**：body 是 OpenAI 标准格式，加私有字段会被严格校验的上游拒。
@@ -641,7 +404,6 @@ X-Gateway-Request-Id: req_01H...
 X-Gateway-Route: deepseek/deepseek-chat
 X-Gateway-Mode: auto
 X-Gateway-Jailbreak-Trace: L1:rot13:2
-X-Gateway-Compress-Trace: caveman:3200>2100
 X-Gateway-Levels-Tried: identity,rot13,base64
 ```
 
@@ -685,17 +447,16 @@ X-Gateway-Levels-Tried: identity,rot13,base64
 
 ```
 G0 骨架 → G1 数据层 → G2 转发层 →┬→ G3 路由 ─┬→ G7 模式 → G8 接入 → G10 端到端
-                                  ├→ G4 破甲 ─┤
-                                  └→ G5 压缩 ─┘
+                                  └→ G4 破甲 ─┘
 
-G6 可观测横切 G3/G4/G5，最后接线
+G6 可观测（route_trace + token 计量）横切 G3/G4，最后接线
+（原 G5 压缩层已删除）
 G9 CLI 挂最后
 ```
 
 **为什么 G2 转发层这么早**：所有层最终都要**发一次请求**才能验证。
 没有转发层，破甲改了 prompt 发给谁？路由选了谁去调？
 
-**为什么 G5 压缩层可并行**：纯函数 `messages -> messages`，零外部依赖。
 
 ## 批次表
 
@@ -712,14 +473,13 @@ G9 CLI 挂最后
 | **G4-J5** | 技术有效性记忆 | J2, G1 | 2 |
 | **G4-J6** | 生成型 5 个 | J1 | 6 |
 | **G4-J7** | L4 PAIR/TAP | J6 | 3 |
-| **G5** | 压缩层 | — | 5 |
 | **G6** | 可观测（route_trace + 归因） | G3/G4/G5 | 2 |
 | **G7** | 模式层 | G3 | 2 |
 | **G8** | 接入层 | 全部上层 | 3 |
 | **G9** | CLI | G8 | 1 |
 | **G10** | 端到端 | 全部 | 5 |
 
-**合计约 80 个源文件**（其中 26 个是破甲技术，可批量抄）
+**合计约 75 个源文件**（原 80 减去压缩层的 5 个）（其中 26 个是破甲技术，可批量抄）
 
 ## 每批六要素（以 G0 为例）
 
@@ -737,8 +497,8 @@ G9 CLI 挂最后
 ## 最短验证路径
 
 ```
-G0 → G1 → G2 → G5（压缩，纯函数最快见效）
-   → G4-J4（拒绝检测，纯函数）
+G0 → G1 → G2
+   → G4-J4（拒绝检测，纯函数，零依赖最快见效）
    → G3（路由）
    → G4-J1 → J2 → J3（破甲主体）
    → G6（可观测接线）
@@ -759,7 +519,7 @@ G0 → G1 → G2 → G5（压缩，纯函数最快见效）
 
 | 类型 | 发真请求 | 速度 | 用在哪 |
 |---|---|---|---|
-| **单元** | ❌ | 毫秒 | 破甲技术、压缩策略、拒绝检测、配置 |
+| **单元** | ❌ | 毫秒 | 破甲技术、拒绝检测、配置 |
 | **集成** | ❌（`httpx.MockTransport`） | 毫秒 | provider 适配、路由、模式、接入层 |
 | **端到端** | ✅ | 秒 | G10，需 key，手动跑 |
 
@@ -827,19 +587,9 @@ NOT_REFUSALS = [
 ]
 ```
 
-## 压缩测试要断言「不能压过头」
+## 压缩测试：不做（压缩层已删）
 
-```python
-def test_压缩省token且保留关键技术词():
-    msgs = [{"role":"user","content":"请 帮我 详细地 说明一下 SQL 注入 的 绕过 WAF 的 具体 步骤"}]
-    before, after = count_tokens(msgs), count_tokens(Caveman().compress(msgs))
-    assert after < before                    # 确实省了
-    assert after >= before * 0.5             # ★ 但不能压掉一半以上
-    for kw in ["SQL", "注入", "WAF", "绕过"]:  # ★ 关键技术词必须还在
-        assert kw in str(Caveman().compress(msgs))
-```
-
-**为什么断言 `after >= before*0.5`**：只断言「变小」的话，一个把所有内容删掉的坏实现也能通过。
+只测 token 计量：`tokens_used` 读数与上游返回的 `usage` 一致（1 条，归 G6）。
 
 ## 全量回归门
 
@@ -864,8 +614,7 @@ def test_压缩省token且保留关键技术词():
 | G4-J4 | `test_refusal.py` | 14 |
 | G4-J5 | `test_technique_prior.py` | 4 |
 | G4-J6 | `test_llm_rewrite.py` | 5 |
-| G5 | `test_compress.py` | 8 |
-| G6 | `test_observability.py` | 4 |
+| G6 | `test_observability.py` | 5 |
 | G7 | `test_mode.py` | 6 |
 | G8 | `test_ingress.py` | 8 |
 | G9 | `test_cli.py` | 4 |
@@ -920,27 +669,29 @@ def test_压缩省token且保留关键技术词():
 | `roles.py` 角色预设 | 路由参数应由请求内容和策略决定，不靠用户选角色 |
 | 本地 JSONL job queue | 单机方案，多实例不适用 |
 
-## 11.3 9router（节省与降级）
+## 11.3 9router（SSE 分层）—— 压缩部分已弃用
+
+> **2026-11-11 修订**：原打算借它的 RTK 压缩，Master 决策后**压缩部分全部弃用**。
 
 **✅ 借**
 
 | 机制 | 为什么 |
 |---|---|
-| RTK 策略注册表（`registry.js` + `filters/`） | 压缩策略**可插拔**，不是写死一种 |
-| `caveman` / `ponytail` 两种风格 | 取舍不同（砍词 vs 砍结构），可对比 |
-| `autodetect.js` | 判断「值不值得压」——短 prompt 压了更差 |
-| `headroom.js` | 有余量不压（保质量），快超才压（保成功） |
-| SSE 分层（executors/handlers/providers/transformer/translator） | 流式格式翻译最容易出错，这个分层值得照搬 |
+| SSE 流式分层（executors/handlers/providers/transformer/translator） | 流式格式翻译最容易出错，这个分层值得照搬结构 |
 | 多账号降级 | 同 provider 多账号轮换 |
 
 **❌ 弃**
 
 | 不借 | 理由 |
 |---|---|
+| **RTK 压缩全套**（caveman/ponytail/autodetect/headroom/registry/filters） | **有损操作必须有唯一负责人**。Agent 知道哪段不可恢复，网关只看到 messages 数组只能按通用规则压；且 agent 已压过一次，双重有损无法归因 |
 | Next.js 全家桶 + 1,544 个 js | 上游是「本地 Dashboard 优先」，我们是网关 |
 | `src/mitm/` | MITM 引入证书管理复杂度，与网关职责不同 |
-| IDE 集成（Claude Code/Cursor/Copilot） | 客户端适配不是网关职责 |
-| npm 包发布形态 | 我们按服务部署，不做 npx |
+| IDE 集成 | 客户端适配不是网关职责 |
+| npm 包发布形态 | 我们按服务部署 |
+
+**留一句防复发**：9router 的 RTK 是给「人在 Dashboard 里聊天、context 由它自己管」设计的；
+我们下挂 Claude Code / Cursor，它们有完整 context 管理。照搬卖点等于在别人管好的地方再插一手。
 
 ## 11.4 EasyJailbreak（破甲技术库）⭐
 
@@ -1017,7 +768,6 @@ def test_压缩省token且保留关键技术词():
 | 能力 | 为什么都没有 | 我们怎么做 | 价值 |
 |---|---|---|---|
 | **可解释路由 `route_trace`** | 三家都只给结果 | 每次返回候选集 + 每个被排除的原因 + 最终依据 | 出问题不用猜 |
-| **压缩效果归因** | 9router 说省 20-40% 但**没做 A/B** | 每次落一行「策略 × 节省率 × 是否拒答」 | 能回答「压完质量掉多少」 |
 | **技术有效性记忆** | EasyJailbreak 是评估工具，不关心「怎么最快过」 | 「模型 × 技术 成功率矩阵」，下次优先高成功率 | 从「每次从头试」到「越用越快」 |
 | **成本预算硬门** | 三家都只有事后统计 | 预算到线就降级/拒绝，不是超了才告警 | 不超支 |
 | **route_trace 可回放** | 无 | 存决策输入快照，能按原样重放一次路由 | 回归测试 |
