@@ -172,6 +172,32 @@ model: "openai:key2/gpt-4o"    → 锁 provider + 具体账号 + 模型
 
 **默认 `strict`**：MANUAL 的语义是「我明确要这个」，静默换家等于骗人。要降级必须显式配。
 
+### ⚠️ AUTO 模式必须显式回报「选了什么」（硬要求）
+
+**AUTO 的本质是「用户放弃了选择权，把选择权交给网关」。既然选择权让渡了，网关就必须
+把选择结果明确告诉用户** —— 否则用户无法核实它选得对不对。
+
+**四件事必须每次响应都说清，一件都不能省**：
+
+| 项 | 为什么必须 |
+|---|---|
+| **① 模式**（auto / manual） | 不说模式 → 用户分不清「这是我自己要的」还是「网关替我选的」 |
+| **② 请求时指定的**（requested） | 不记这个 → 降级后用户以为拿到的还是自己要的 |
+| **③ 实际路由到的**（actual） | 不说这个 → 用户不知道这次用了谁，出问题不知道找谁 |
+| **④ 为什么是它**（source） | 不说为什么 → 出问题只能猜 |
+
+**最关键的是 ② 和 ③ 必须分开** —— 四种情况下它们的关系完全不同：
+
+| 情况 | requested | actual | 关系 |
+|---|---|---|---|
+| `auto` | `none` | `deepseek/deepseek-chat` | 用户没指定，网关选的 |
+| `manual` + `strict` | `openai/gpt-4o` | `openai/gpt-4o` | 相同（正常） |
+| `manual` + `fallback` | `openai/gpt-4o` | `deepseek-chat` | **不同！必须醒目提示** |
+| `manual` + 账号轮换 | `openai:key1/gpt-4o` | `openai:key2/gpt-4o` | **账号变了** |
+
+**「requested ≠ actual」是最需要显式提示的情况** —— 用户要 A、拿到 B 的答案却以为是 A 的，
+这是网关能犯的最严重的一类"静默欺骗"。
+
 ---
 
 ## 5.2 ② 破甲层：4 级阶梯
@@ -766,9 +792,9 @@ effective_max = min(
 ```http
 POST /v1/chat/completions
 Authorization: Bearer <gateway_key>
-X-Gateway-Mode: auto
-X-Gateway-Route: openai/gpt-4o          (仅 manual)
-X-Gateway-Fallback: strict
+X-Gateway-Mode: auto                    # auto | manual（默认 auto）
+X-Gateway-Route: openai/gpt-4o          # 仅 manual 时需要；三档粒度见 §5.1
+X-Gateway-Fallback: strict              # 仅 manual 时生效
 X-Gateway-Jailbreak: auto
 ```
 
@@ -777,12 +803,124 @@ X-Gateway-Jailbreak: auto
 ## 响应头（每次都有，不许静默）
 
 ```http
-X-Gateway-Request-Id: req_01H...
-X-Gateway-Route: deepseek/deepseek-chat
+# ── 路由四件套（每次都有，一件都不能省）──
 X-Gateway-Mode: auto
+X-Gateway-Route-Requested: none
+X-Gateway-Route-Actual: deepseek/deepseek-chat
+X-Gateway-Route-Source: auto_rank
+
+# ── 破甲 ──
 X-Gateway-Jailbreak-Trace: L1:rot13:2
 X-Gateway-Levels-Tried: identity,rot13,base64
+
+# ── 其他 ──
+X-Gateway-Request-Id: req_01H...
+X-Gateway-Budget: used=0.12/1.00 window=daily state=ok
 ```
+
+### 响应 body 附 `x_gateway`（header 放不下的完整信息）
+
+**为什么要 body 里也带一份**：① 有些客户端/SDK 拿不到自定义 header；② 完整候选集和排除原因
+在 header 里放不下；③ 日志排查时需要结构化数据。
+
+**非流式响应**（OpenAI 格式 + 一个附加字段，不破坏兼容）：
+
+```json
+{
+  "id": "chatcmpl-...",
+  "choices": [{"message": {"role": "assistant", "content": "..."}}],
+  "usage": {"prompt_tokens": 120, "completion_tokens": 340},
+
+  "x_gateway": {
+    "mode": "auto",
+    "route_requested": null,
+    "route_actual": "deepseek/deepseek-chat",
+    "route_source": "auto_rank",
+    "route_reason": {
+      "chosen": {"health": 0.95, "quota": 1.0, "latency_ms": 320, "cost_per_1k": 0.00027},
+      "excluded": [
+        {"route": "openai/key1/gpt-4o", "reason": "cooldown", "until": 1762示...},
+        {"route": "anthropic/main/claude", "reason": "no_credential"}
+      ]
+    },
+    "jailbreak": {"level": 1, "technique": "rot13", "attempts": 2, "levels_tried": ["identity","rot13"]},
+    "budget": {"used_usd": 0.12, "limit_usd": 1.00, "state": "ok"}
+  }
+}
+```
+
+**流式响应（SSE）**：HTTP header 在第一个字节就已发出、之后改不了，所以 **SSE 必须在
+第一个 event 里带路由信息**，客户端读到它就已经知道「谁在回答」：
+
+```
+event: gateway_meta
+data: {"mode":"auto","route_requested":null,"route_actual":"deepseek/deepseek-chat","route_source":"auto_rank"}
+
+event: message
+data: {"delta":{"content":"..."}}
+
+event: message
+data: {"delta":{"content":"..."}}
+
+event: done
+data: {"x_gateway":{"budget":{"used_usd":0.12,"state":"ok"},"jailbreak":{"level":1,"technique":"rot13"}}}
+```
+
+**关键**：`gateway_meta` 必须是**第一个** event —— 让客户端在收到任何正文之前就知道是谁在回答。
+标准 OpenAI SSE 客户端会忽略未知 event 类型，所以不破坏兼容。
+
+**错误响应也要带**（auto 选不到模型时，用户要知道它试过什么）：
+
+```json
+{
+  "error": {
+    "type": "no_healthy_route",
+    "message": "auto 模式尝试了 4 个候选，全部不可用",
+    "x_gateway": {
+      "mode": "auto",
+      "route_requested": null,
+      "route_actual": null,
+      "route_source": "auto_rank",
+      "route_reason": {
+        "excluded": [
+          {"route": "openai/key1/gpt-4o", "reason": "cooldown", "until": "..."},
+          {"route": "openai/key2/gpt-4o", "reason": "quota_exhausted"},
+          {"route": "deepseek/main/deepseek-chat", "reason": "http_503"},
+          {"route": "anthropic/main/claude", "reason": "no_credential"}
+        ]
+      }
+    }
+  }
+}
+```
+
+**这条最重要**：失败时如果只说「没有可用路由」，用户**完全无法判断**是 key 全过期了、
+还是全在冷却、还是模型名写错了。**把排除原因列出来，用户自己就能修。**
+
+### `X-Gateway-Route-Source` 六种取值
+
+| 值 | 含义 | requested vs actual |
+|---|---|---|
+| `auto_rank` | auto 模式按 `rank_targets` 选出 | 一个是 `none`，一个是选中的 |
+| `manual_lock` | manual 锁定，就是你要的 | **相同** |
+| `manual_account_rotate` | manual 锁了 provider，但换了账号（配额耗尽） | provider 同、**account 不同** |
+| `fallback_same_model` | manual + 降级，换同模型的其他 provider | **不同** ⚠️ |
+| `fallback_any` | manual + 降级，换成任意可用模型 | **不同** ⚠️ |
+| `budget_downgrade` | 成本预算超限降级 | **不同** ⚠️ |
+
+**带 ⚠️ 的三种是「requested ≠ actual」** —— 客户端应当把它们当告警，
+而不是当成正常响应处理。网关侧也会在 `request_log` 里把这些标记为 `route_mismatch=1`。
+
+### auto 模式下的可解释性（用户能核实「选得对不对」）
+
+auto 模式下光说「选了 deepseek」不够，用户会问「为什么不是 openai」。所以再加一个头：
+
+```http
+X-Gateway-Route-Reason: health=0.95,quota=1.0,latency=320ms,budget=ok | excluded: openai(key1=cooldown),anthropic(no_key)
+```
+
+**完整候选集与排除原因在响应 body 的 `x_gateway` 里**（header 放不下）：
+见下面「响应 body 附路由信息」。
 
 `X-Gateway-Jailbreak-Trace` 格式：`L<级别>:<技术>:<第几次成功>`
 
@@ -831,6 +969,37 @@ X-Gateway-Levels-Tried: identity,rot13,base64
    （重启不丢、多进程一致）
 3. **破甲重试的计费** → 一次请求内多次上游调用**每次都计费**，累加为同一 `request_id` 下
    多条 `budget_ledger`。所以「一次请求可能比整个预算还贵」—— 到线判定看**窗口累计**，不看单请求
+
+## 8.4 CLI 显示：默认就把路由信息打出来
+
+`gateway chat` 默认在输出前后各打一行路由信息，**不需要加 `--trace` 才看得到**：
+
+```bash
+$ gateway chat "帮我看看这段代码有什么漏洞"
+
+[auto] → deepseek/deepseek-chat  (health=0.95 quota=1.0 320ms)
+<模型回答内容>
+[auto] deepseek/deepseek-chat · 340 tokens · $0.0004
+
+# manual 且发生降级时，显著提示
+$ gateway chat --route openai/gpt-4o "..."
+
+[manual] 请求 openai/gpt-4o
+⚠️  降级 → deepseek/deepseek-chat  (原因: openai 全部不可用, fallback_same_model)
+<模型回答内容>
+
+# 加 --trace 看完整候选集
+$ gateway chat --trace "..."
+[auto] → deepseek/deepseek-chat
+  候选集 4 个:
+    ✅ deepseek/deepseek-chat   health=0.95 quota=1.0 320ms    ← 选中
+    ❌ openai/key1/gpt-4o       cooldown (至 12:34:56)
+    ❌ openai/key2/gpt-4o       quota_exhausted
+    ❌ anthropic/main/claude    no_credential
+```
+
+**为什么默认就打**：路由信息是「这次的回答是谁给的」这一事实，
+**不该藏在需要额外参数的开关后面**。`--trace` 只用来加「完整候选集」这层细节。
 
 ## 其他端点
 
@@ -990,6 +1159,56 @@ NOT_REFUSALS = [
 
 只测 token 计量：`tokens_used` 读数与上游返回的 `usage` 一致（1 条，归 G6）。
 
+## 路由信息显式的测试（Master 硬要求，6 条）
+
+```python
+async def test_auto模式响应头四件套齐全(client):
+    resp = await client.post("/v1/chat/completions", json={...},
+                             headers={"X-Gateway-Mode": "auto"})
+    assert resp.headers["X-Gateway-Mode"] == "auto"
+    assert resp.headers["X-Gateway-Route-Requested"] == "none"
+    assert resp.headers["X-Gateway-Route-Actual"] != "none"      # 真的选了
+    assert resp.headers["X-Gateway-Route-Source"] == "auto_rank"
+
+async def test_manual降级必须标出requested与actual不同(client, mock_pool):
+    mock_pool.set_unavailable("openai", "gpt-4o")               # 目标挂了
+    resp = await client.post("/v1/chat/completions", json={...},
+                             headers={"X-Gateway-Mode": "manual",
+                                      "X-Gateway-Route": "openai/gpt-4o",
+                                      "X-Gateway-Fallback": "fallback_same_model"})
+    assert resp.headers["X-Gateway-Route-Requested"] == "openai/gpt-4o"
+    assert resp.headers["X-Gateway-Route-Actual"] != "openai/gpt-4o"   # ★ 必须不同
+    assert resp.headers["X-Gateway-Route-Source"] == "fallback_same_model"
+    assert resp.json()["x_gateway"]["route_mismatch"] is True          # ★ body 里也标
+
+async def test_SSE第一个event是gateway_meta(client):
+    async with client.stream("POST", "/v1/chat/completions", json={"stream": True}) as r:
+        first = await anext(aiter(r.aiter_lines()))
+        assert "gateway_meta" in first                                # ★ 第一个 event
+
+async def test_auto全挂时错误响应列出排除原因(client, mock_pool):
+    mock_pool.set_all_unavailable()
+    resp = await client.post("/v1/chat/completions", json={...})
+    assert resp.status_code == 503
+    excluded = resp.json()["error"]["x_gateway"]["route_reason"]["excluded"]
+    assert len(excluded) >= 1
+    assert all("reason" in e for e in excluded)                       # ★ 每个都有原因
+
+async def test_manual严格模式不改路由(client, mock_pool):
+    mock_pool.set_unavailable("openai", "gpt-4o")
+    resp = await client.post("/v1/chat/completions", json={...},
+                             headers={"X-Gateway-Route": "openai/gpt-4o",
+                                      "X-Gateway-Fallback": "strict"})
+    assert resp.status_code == 503                                    # 不降级
+
+async def test_CLI默认打印路由(client):
+    out = run_cli("chat", "hi")
+    assert "[auto]" in out                                            # ★ 不加 --trace 也有
+    assert "→" in out
+```
+
+**前两条是核心**：auto 下四件套必须齐；manual 降级下 `requested ≠ actual` 必须显式标出。
+
 ## 全量回归门
 
 ```bash
@@ -999,7 +1218,7 @@ NOT_REFUSALS = [
 **判据**：`0 failed`。任何一条红都必须解释清楚（真 bug 还是测试口径错），
 **不许 `-k` 跳过、不许 `--deselect`、不许改断言迁就实现**。
 
-## 测试规划约 115 条（119 − 8 压缩 + 4 预算）
+## 测试规划约 121 条（119 − 8 压缩 + 4 预算 + 6 路由显式）
 
 | 批 | 文件 | 条数 |
 |---|---|---|
