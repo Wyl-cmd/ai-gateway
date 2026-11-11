@@ -37,7 +37,7 @@
 2. **路由**：多 provider / 多账号自动选，谁挂了自动切
 3. **可解释**：每次请求都能回答「为什么走了这条路由」「破甲用的是哪个技术」
 
-**明确不做**：上下文压缩（理由见 §5.3 —— agent 自带，网关再压是双重有损）。
+**明确不做**：上下文压缩 —— agent 自带，网关再压是双重有损（理由见 §5.3）。
 
 **不是**：对外服务、多租户计费、又一个管理后台、上下文压缩中间层。**自用单机**。
 
@@ -339,11 +339,246 @@ Agent 压一次已经损失，网关再压一次 —— 出问题时**分不清�
 
 | 删掉 | 原本要做什么 |
 |---|---|
-| `compress/` 五个文件 | registry / caveman / ponytail / autodetect / headroom |
+| `compress/` 五个文件 | registry / caveman / ponytail / autodetect / headroom 五个模块 |
 | G5 整个批次 | 5 个源文件 + 8 条测试 |
-| `X-Gateway-Compress` 请求头 | 单请求选择压缩策略 |
-| `X-Gateway-Compress-Trace` 响应头 | 报告压缩效果 |
-| `# （原 [compress] 配置段已删除 —— 压缩层不做）
+| 请求头 `X-Gateway-Compress` | 单请求选择压缩策略 |
+| 响应头 `X-Gateway-Compress-Trace` | 报告压缩效果 |
+| 配置段 | 策略名与阈值 |
+| 「压缩效果归因」独有能力 | 策略 × 节省率 × 拒答率三维统计 |
+
+
+## 5.4 ④ 路由层
+
+### 核心机制（照抄 freellmpool）
+
+| 机制 | 做法 | 为什么重要 |
+|---|---|---|
+| **健康租约** | `_acquire_route` / `_record_route_success` / `_record_route_failure` / `_refresh_route_lease` | 防同一死路由被多个请求同时打 |
+| **失败分类** | `_is_health_failure` / `_health_failure_class` / `_is_account_quota_exhaustion` | **最有价值的一条：配额耗尽 → 换号；服务故障 → 换 provider** |
+| **目标排序** | `rank_targets`（健康度 + 配额 + 延迟） | 综合打分，不是「按优先级列表硬试」 |
+| **冷却** | `_mark_cooldown` + `cooldown_snapshot` | 连续失败进冷却，不无限重试 |
+| **第一波分离** | `_provider_first_wave` | 先打主力池，失败才降免费池 |
+| **能力表** | （借 one-api `model/ability.go`） | 「哪个渠道能服务哪个模型」查表，不硬编码 |
+
+### 我们的排序公式（加成本维度）
+
+```
+score = w_health*health + w_quota*remaining_quota
+      + w_latency*(1/latency) + w_cost*(1/cost)
+```
+
+**默认 `w_cost = 0`**（不偷偷省钱），开 `--prefer-cheap` 才生效。
+
+### 最关键的三条测试（保证「换 key 还是换家」不出错）
+
+```python
+def test_配额耗尽只跳过该账号不跳过整个provider():
+    pool = Pool([("openai","key1"), ("openai","key2")])
+    pool.mark_quota_exhausted("openai", "key1")
+    candidates = pool.candidates("gpt-4o")
+    assert ("openai","key1") not in candidates
+    assert ("openai","key2") in candidates      # ★ 同 provider 其他账号仍可用
+
+def test_服务故障才跳过整个provider():
+    pool = Pool([("openai","key1"), ("openai","key2")])
+    pool.mark_down("openai")
+    assert pool.candidates("gpt-4o") == []
+
+def test_连续失败N次进冷却():
+    pool = Pool([("openai","key1")])
+    for _ in range(3):
+        pool.record_failure("openai:key1", is_health_failure=True)
+    assert pool.is_cooling("openai:key1") is True
+```
+
+---
+
+## 5.5 ⑤ 转发层
+
+### 统一接口（抄 one-api `relay/adaptor/interface.go`）
+
+```python
+class Adaptor(ABC):
+    @abstractmethod
+    def transform_request(self, req: ChatRequest) -> dict: ...
+
+    @abstractmethod
+    def transform_response(self, raw: dict) -> ChatResponse: ...
+
+    @abstractmethod
+    async def chat(self, req: ChatRequest) -> ChatResponse: ...
+
+    @abstractmethod
+    async def stream(self, req: ChatRequest) -> AsyncIterator[ChatChunk]: ...
+
+    @abstractmethod
+    def models(self) -> list[str]: ...
+```
+
+### 首版 5 家
+
+OpenAI / Anthropic / DeepSeek / Gemini / 国内聚合（one-api 自建）
+
+**为什么先 5 家不 38 家**：38 家是「字段映射」的体力活，不阻塞架构验证。
+先把 5 家跑通、`route_trace` 和破甲验证有效，再加是最省时间的顺序。
+
+### 关键：`ProviderError` 必须带两个布尔标记
+
+```python
+class ProviderError(Exception):
+    is_health_failure: bool      # 服务故障（换 provider）
+    is_quota_exhausted: bool     # 配额耗尽（换账号）
+```
+
+这是路由层做失败分类的**唯一输入**。
+
+---
+
+# 六、数据模型
+
+SQLite（WAL 模式）。运行数据不入 git。
+
+## 6.1 `route_state` —— 路由健康状态
+
+```sql
+CREATE TABLE IF NOT EXISTS route_state (
+    route_id      TEXT PRIMARY KEY,      -- "openai:key1/gpt-4o"
+    provider      TEXT NOT NULL,
+    account       TEXT,                  -- 只存 key_id，不存 key 本体
+    model         TEXT NOT NULL,
+    success_count INTEGER NOT NULL DEFAULT 0,
+    fail_count    INTEGER NOT NULL DEFAULT 0,
+    consecutive_fail INTEGER NOT NULL DEFAULT 0,
+    lease_owner   TEXT,                  -- 请求 id
+    lease_until   INTEGER,               -- epoch ms
+    cooldown_until INTEGER NOT NULL DEFAULT 0,
+    quota_state   TEXT NOT NULL DEFAULT 'ok',   -- ok | exhausted
+    quota_until   INTEGER NOT NULL DEFAULT 0,
+    last_ok_at    INTEGER,
+    last_fail_at  INTEGER,
+    updated_at    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_route_state_cool ON route_state(cooldown_until);
+```
+
+**为什么合成一张表**：避免「租约在 A 表、健康在 B 表」导致并发时读到不一致状态。
+
+## 6.2 `attempt_log` —— 每次破甲尝试
+
+```sql
+CREATE TABLE IF NOT EXISTS attempt_log (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_id    TEXT NOT NULL,
+    model         TEXT NOT NULL,
+    level         INTEGER NOT NULL,      -- 0~4
+    technique     TEXT NOT NULL,         -- "rot13" / "deepinception" / "identity"
+    ok            INTEGER NOT NULL,
+    refusal_kind  TEXT,                  -- phrase|structure|model|judge|partial
+    latency_ms    INTEGER NOT NULL,
+    ts            INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_attempt_model_tech ON attempt_log(model, technique);
+```
+
+**「模型 × 技术 成功率矩阵」的数据来源**：
+
+```sql
+SELECT model, technique,
+       SUM(ok) * 1.0 / COUNT(*) AS success_rate,
+       COUNT(*) AS n
+FROM attempt_log
+WHERE ts > ?
+GROUP BY model, technique
+HAVING n >= 5          -- 样本太少不给结论
+ORDER BY success_rate DESC;
+```
+
+**为什么 `HAVING n >= 5`**：1/1 的 100% 没有统计意义，拿它排序会让新技术的偶然成功误导策略。
+
+## 6.3 `request_log` —— 每次请求一行
+
+```sql
+CREATE TABLE IF NOT EXISTS request_log (
+    request_id    TEXT PRIMARY KEY,
+    mode          TEXT NOT NULL,         -- auto | manual
+    route_id      TEXT,
+    model         TEXT,
+    provider      TEXT,
+    jailbreak_level INTEGER NOT NULL DEFAULT 0,
+    jailbreak_technique TEXT,
+    jailbreak_attempts INTEGER NOT NULL DEFAULT 0,
+    prompt_tokens INTEGER,          -- 上游 usage 原样记录，不做本地分词
+    completion_tokens INTEGER,
+    ok            INTEGER NOT NULL,
+    error_kind    TEXT,
+    latency_ms    INTEGER NOT NULL,
+    trace_json    TEXT,                  -- RouteTrace，可回放
+    ts            INTEGER NOT NULL
+);
+```
+
+## 6.4 `technique_prior` —— 技术先验（聚合缓存）
+
+```sql
+CREATE TABLE IF NOT EXISTS technique_prior (
+    model       TEXT NOT NULL,
+    technique   TEXT NOT NULL,
+    success_rate REAL NOT NULL,
+    n           INTEGER NOT NULL,
+    updated_at  INTEGER NOT NULL,
+    PRIMARY KEY (model, technique)
+);
+```
+
+`attempt_log` 是**明细**（append-only 不删），`technique_prior` 是**聚合缓存**（定期重算）。
+
+---
+
+# 七、配置格式
+
+`config.toml`（不入 git）。
+
+```toml
+[server]
+host = "127.0.0.1"          # 默认只监听本地
+port = 8787
+
+[storage]
+db_path = "./data/gateway.db"
+
+[mode]
+default = "auto"            # auto | manual
+
+[route]
+w_health  = 0.5
+w_quota   = 0.3
+w_latency = 0.2
+w_cost    = 0.0             # 0 = 不偷偷省钱
+cooldown_after_fails = 3
+cooldown_seconds     = 300
+lease_seconds        = 30
+
+[jailbreak]
+enabled     = true          # 默认开
+start_level = 1             # 直接进 L1（L0 总是先加）
+max_level   = 2             # 默认到 L2；3/4 需显式开
+ladder_timeout_ms = 12000
+
+[l3]
+enabled  = true
+only_if = ["empty_response", "hard_refusal"]
+
+[l4]
+enabled       = false       # PAIR/TAP 默认关闭
+budget_ms     = 30000
+max_attempts  = 8
+
+[refusal]
+head_chars   = 200
+use_model    = true         # 启用 garak 的 ModernBERTRefusal（需装 transformers）
+extra_phrases = []
+
+> （原 [compress] 配置段已删除 —— 压缩层不做，理由见 §5.3）
 
 [auth]
 gateway_keys = []           # 空 = 不鉴权（仅 127.0.0.1 安全）
@@ -600,7 +835,7 @@ NOT_REFUSALS = [
 **判据**：`0 failed`。任何一条红都必须解释清楚（真 bug 还是测试口径错），
 **不许 `-k` 跳过、不许 `--deselect`、不许改断言迁就实现**。
 
-## 测试规划约 119 条
+## 测试规划约 111 条（原 119 减去压缩的 8 条）
 
 | 批 | 文件 | 条数 |
 |---|---|---|
