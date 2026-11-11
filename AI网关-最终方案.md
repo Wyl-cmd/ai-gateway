@@ -1444,7 +1444,7 @@ for r in songquanpeng/one-api 0xzr/freellmpool decolua/9router \
   git -c http.proxy= -c https.proxy= clone --depth=1 "https://github.com/$r.git"
 done
 
-# garak 的 git clone 会 TLS 中断，用 codeload
+**注意**：garak 的 git clone 会 TLS 中断（`GnuTLS recv error (-110)`），用 codeload 下载：
 curl -sL -o /tmp/garak.tar.gz \
   https://codeload.github.com/NVIDIA/garak/tar.gz/refs/heads/main
 mkdir -p garak && tar xzf /tmp/garak.tar.gz -C /tmp && cp -r /tmp/garak-main/. garak/
