@@ -463,49 +463,80 @@ X-Gateway-Route-Source: provider_switch
 
 **代价**：Qt 界面没那么"现代"。但这是自用工具，**能看清状态 > 好看**。
 
-## 5.2 主界面布局
+## 5.2 平台形态：Windows 托盘 / Linux 窗口（Master 裁决）
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│ AI 网关                          [● AUTO 手动]   ● 运行中  12 路  │
-├──────────────────────────────────────────────────────────────────┤
-│ 当前路由（Master ④ 要求全显示）                                    │
-│ ┌──────────────────────────┬────────────────────────────────────┐│
-│ │ 模式      AUTO（自动）    │ 供应商   DeepSeek 官方              ││
-│ │ 型号      deepseek-chat   │ 账号     key1（额度 ∞）             ││
-│ │ 延迟      320 ms          │ 本次花费 $0.0004                    ││
-│ ├──────────────────────────┴────────────────────────────────────┤│
-│ │ 降级链（手动模式下"会降到哪"也在这里显示）                        ││
-│ │   deepseek-chat(官方,key1) → deepseek-chat(官方,key2)          ││
-│ │   → deepseek-chat(中转A) → deepseek-flash(官方) → 无可用        ││
-│ └───────────────────────────────────────────────────────────────┘│
-├──────────────────────────────────────────────────────────────────┤
-│ 路由表                                        [筛选: 全部型号 ▾]  │
-│ 型号            供应商   账号  健康  配额   延迟  操作           │
-│ deepseek-chat   官方     key1  ●正常  ∞     320ms [停用]        │
-│ deepseek-chat   官方     key2  ●正常  ∞     350ms [停用]        │
-│ deepseek-chat   中转A    key1  ▲冷却  ∞     890ms [启用]        │
-│ deepseek-flash  官方     key1  ●正常  ∞     180ms [停用]        │
-│ gpt-5           官方     key1  ✕无key —      —    [配置]          │
-├──────────────────────────────────────────────────────────────────┤
-│ [切换策略] [总预算] [破甲] [请求日志] [设置]                       │
-└──────────────────────────────────────────────────────────────────┘
+| 平台 | 形态 | 理由 |
+|---|---|---|
+| **Windows** | **系统托盘常驻**（`QSystemTrayIcon`），主窗口按需弹出 | 网关是常驻后台服务，托盘最合适：不占任务栏、不打断工作、右键即管理。**Windows 用户习惯托盘** |
+| **Linux** | **普通窗口**（`QMainWindow`），可选最小化 | Linux 桌面托盘（StatusNotifier/AppIndicator）依赖桌面环境，GNOME 默认不给托盘、KDE 有但风格不一 —— **塞进去会拥挤且不可靠** |
+
+**平台检测与降级**（不能硬编码）：
+
+```python
+import sys
+from PySide6.QtWidgets import QSystemTrayIcon
+
+def gui_mode() -> str:
+    """决定用托盘还是普通窗口。"""
+    if sys.platform != "win32":
+        return "window"                       # Linux/macOS 一律窗口
+    if not QSystemTrayIcon.isSystemTrayAvailable():
+        return "window"                       # Windows 上托盘不可用（极罕见）也别崩
+    return "tray"
 ```
 
-**手动模式下**，「当前路由」卡片变成：
-```
-│ 模式      手动（锁定）                                            │
-│ 请求       openai-official / gpt-4o                              │
-│ 实际       openai-official / gpt-4o        ✅ 就是你要的           │
+**托盘行为（Windows）**：
 
-# 若发生降级：
-│ 请求       openai-official / gpt-4o                              │
-│ 实际       deepseek-official / deepseek-chat  ⚠️ 已降级            │
-│ 原因       openai 全部账号额度耗尽，按顺序降到 deepseek-chat         │
-│ 会降到哪   deepseek-chat → deepseek-flash → 无可用   ← Master ④ 要求│
+| 操作 | 行为 |
+|---|---|
+| 关闭主窗口 | **最小化到托盘**，不退出（首次弹一次气泡说明「已最小化到托盘」） |
+| 单击托盘图标 | 显示/隐藏主窗口 |
+| 双击托盘图标 | 显示主窗口并聚焦 |
+| 右键托盘图标 | 菜单：显示主窗口 / 暂停服务 / 自动·手动切换 / 当前状态 / 退出 |
+| 托盘 tooltip | `AI Gateway · AUTO · deepseek-chat · 运行中` ← **不打开窗口就能看到当前用谁** |
+| 托盘图标颜色 | 绿=正常 / 黄=有降级 / 红=全部不可用 / 灰=暂停 |
+
+**tooltip 显示当前模型是关键**（对应 §五 Master 的④要求）——
+不用点开窗口，鼠标悬停就知道「现在是 auto 模式、用的 deepseek-chat」。
+
+**Linux 窗口行为**：
+
+| 操作 | 行为 |
+|---|---|
+| 关闭窗口 | 退出程序（Linux 下关窗就是退出，符合习惯） |
+| 最小化 | 正常最小化到任务栏 |
+| 启动参数 | `--tray` 可强制尝试托盘（给 KDE 等支持的桌面用），失败自动降级为窗口 |
+
+## 5.3 现代化设计（Master 要求「尽量现代化」）
+
+**用 QSS（Qt Style Sheets）做深色主题**，不引入额外框架：
+
+```css
+/* 深色 + 圆角 + 柔和阴影 的核心几条 */
+QMainWindow, QDialog { background: #1a1b1e; color: #e4e4e7; }
+QCard { background: #25262b; border: 1px solid #2c2e33; border-radius: 8px; }
+QStatusDot[state="ok"]   { color: #40c057; }
+QStatusDot[state="warn"] { color: #fab005; }
+QStatusDot[state="down"] { color: #fa5252; }
+QTableWidget { border: none; gridline-color: #2c2e33; alternate-background-color: #1f2023; }
+QPushButton { border: 1px solid #373a40; border-radius: 6px; padding: 6px 14px; }
+QPushButton:hover { background: #2c2e33; }
 ```
 
-## 5.3 实时状态推送
+**现代感的四个具体手法**（都是 Qt 自带能力，不加依赖）：
+
+1. **状态用色点不用文字**：`●正常` / `▲冷却` / `✕无key` —— 扫一眼就懂
+2. **卡片式分区**：当前路由 / 降级链 / 路由表各是一张圆角卡片，不用表格线框死
+3. **表格隔行淡底 + 无竖线**：只留横向分隔，视觉更轻
+4. **等宽字体显示数字**：延迟、token、金额对齐用 `JetBrains Mono` / `Consolas` 回退
+
+**不做的事**（自用工具，避免过度工程）：
+- 不做动画转场
+- 不做自定义标题栏（跨平台问题多）
+- 不引入 QML/Qt Quick（学习成本换不来收益）
+
+
+## 5.4 实时状态推送
 
 后端 → GUI 用 **Qt Signal**（同进程，零网络开销）：
 
@@ -520,7 +551,7 @@ class GatewayBridge(QObject):
 **为什么不用轮询**：轮询 1 秒一次会让「正在发请求时」的界面滞后，
 而 Signal 是事件驱动的，状态一变立刻刷。
 
-## 5.4 打包成 Windows exe
+## 5.5 打包（Windows exe + Linux 二进制）
 
 ```bash
 # 在 Windows 上（或用 wine/虚拟机）
@@ -532,6 +563,18 @@ pyinstaller --onefile --windowed --name AIGateway \
 ```
 
 **产物**：单个 `AIGateway.exe`（约 80 MB，含 Python 运行时 + Qt）。
+
+**Linux 打包**（同样 PyInstaller，一份代码两个目标）：
+
+```bash
+pyinstaller --onefile --windowed --name AIGateway \
+  --add-data "config.toml:." \
+  src/gateway/gui/app.py
+# 产物：dist/AIGateway（约 90 MB）
+# 注意 Linux 用 ':' 当路径分隔符，Windows 用 ';'
+```
+
+**同一个入口文件按平台自动选形态**（§5.2 的 `gui_mode()`），不打两个版本。
 
 **跨平台注意**（必须处理的坑）：
 1. **路径分隔符**：全用 `pathlib.Path`，不用字符串拼 `/`

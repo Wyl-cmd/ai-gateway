@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-gateway"
+version = "0.1.0"
+description = "AI 路由一站式网关：统一入口 + 自动破甲 + 智能路由 + 多账号熔断"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27",
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+]
+
+# GUI 是可选依赖：只跑服务端（无界面）时不用装 PySide6（100 MB+）
+[project.optional-dependencies]
+gui = [
+    "PySide6>=6.6",
+    "qasync>=0.27",          # 把 asyncio 事件循环挂到 Qt 上，Windows ProactorEventLoop 必需
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+gateway = "gateway.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-q --no-header -p no:cacheprovider"
+markers = [
+    "e2e: 需要真实上游 API key，手动跑，默认不选",
+]
