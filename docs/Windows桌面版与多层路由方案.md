@@ -273,67 +273,178 @@ X-Gateway-Conversion: quality=fair,steps=2,diagnostics=claude_budget_adjusted,fi
 
 **这是本项目最大的一块工作量** —— 比破甲层（1,981 行）还大。
 
-# 四、② 三维切换策略（GUI 可配）
+# 四、② 降级策略：**型号亲和为默认，跨型号需显式开**
 
-## 4.1 三个独立的切换维度
+> **Master 的设计（2026-11-11）**：
+> 「非 auto 模式下选用了某款模型的话，应该是同一个型号的模型可以相互之间进行降级。
+> 另外在后台设置可以降级到其他的不同型号的模型，但如果没有设置的话，
+> 默认情况下应当是降级到同一个型号的、只是不同提供商的同一型号模型。
+> 因为这样的话，像是思考深度或者是其他的参数其实是对应的，只是提供商不同而已。」
 
-| 维度 | 触发 | 动作 | 例子 |
-|---|---|---|---|
-| **A 账号轮巡** | 配额耗尽 / 限流 / 该 key 冷却 | 同 provider 换 key | `openai:key1` → `openai:key2` |
-| **B 供应商切换** | 整个 provider 不可用 | 同 family 换 provider | `openai-official` → `azure` → `relay-a` |
-| **C 型号降级** | 同 family 所有 provider 都挂 | 换成更低一代/更小的型号 | `gpt-5` → `gpt-4o` → `gpt-4o-mini` |
+## 4.1 这条设计为什么关键：它替代了「参数翻译」
 
-## 4.2 关键：**顺序可配**（这是 Master ② 的核心要求）
+```
+同一型号的不同提供商
+    ↓
+参数语义完全一致（都是 gpt-4o，reasoning_effort 都叫 reasoning_effort；
+                  都是 claude-opus-4，thinking.budget_tokens 语义相同）
+    ↓
+降级到同型号的另一家 → agent 的参数永远有效
+    ↓
+网关不需要做任何参数解析、翻译、校验
+```
+
+**「型号亲和」免费解决了「参数有效性」问题** —— 不需要翻译，只要降级时别跨型号。
+这比「协议亲和 + 参数翻译 + 诊断报告」干净得多：网关什么都不用碰。
+
+**跨型号则相反**：`gpt-4o` 的 `reasoning_effort` 和 `claude-opus-4` 的 `budget_tokens`
+是完全不同的东西，没有任何可靠的自动换算。所以**跨型号必须显式开启，且开启后网关只做透传**。
+
+## 4.2 三个降级维度（层级关系）
+
+```
+第一层  账号轮巡      同 provider 换 key            ┃ 永远开
+        openai:key1 → openai:key2                ┃
+                                                  ┃
+第二层  供应商切换    同型号、换一家                ┃ ★ 默认开（这是主力）
+        openai-official/gpt-4o                  ┃
+          → azure/gpt-4o → relay-a/gpt-4o       ┃
+                                                  ┃
+第三层  型号降级      换成别的型号                  ┃ ✕ 默认关，需显式开
+        gpt-4o → gpt-4o-mini → claude-haiku     ┃
+```
+
+**默认只走前两层。** 第三层关掉时，同型号所有家都挂了 → **直接失败**，不偷偷换型号。
+
+## 4.3 配置
 
 ```toml
 [fallback]
-# 三个维度的尝试顺序（从左到右）
-order = ["account", "provider", "model"]
-#            ↑ A          ↑ B         ↑ C
+# 默认顺序：先换号，再换同型号的家。型号降级不在默认顺序里。
+order = ["account", "provider"]
 
-# 每一维的开关
+# ── 第一层：账号轮巡（永远开，不可关）──
 [fallback.account]
-enabled = true
-max_attempts = 3          # 最多换 3 个 key
+max_attempts = 3              # 最多试 3 个 key
 
+# ── 第二层：供应商切换（同型号，默认开）──
 [fallback.provider]
-enabled = true
-max_attempts = 2          # 最多换 2 家
+enabled         = true
+same_family_only = true       # ★ 核心：只换同型号的不同供应商
+max_attempts    = 3
+# 同型号内的供应商优先级（不写则按 provider_route.priority 字段）
+prefer = ["openai-official", "azure", "relay-a"]
 
+# ── 第三层：型号降级（默认关）──
 [fallback.model]
-enabled = true
-max_attempts = 2
-# 型号降级链（显式指定，不靠"自动猜哪代低"）
-chain = ["gpt-5", "gpt-4o", "gpt-4o-mini"]
+enabled = false               # ★ 默认不跨型号
+# 只有 enabled=true 时才用下面这些
+chain = []                    # 显式降级链，留空则不降
+require_same_protocol = true  # 开跨型号也建议只跳同协议族
 ```
 
-**两种典型配置**：
+## 4.4 三种配置的语义（写在 GUI 预设里）
+
+### 预设甲：**保守（默认）** —— 绝不换型号
 
 ```toml
-# 配置甲：质量优先（先换账号/家，最后才降能力）
+order = ["account", "provider"]
+[fallback.provider]
+same_family_only = true
+[fallback.model]
+enabled = false
+```
+
+**行为**：`gpt-4o` 的所有供应商都挂了 → **返回 503，告诉你每一家为什么挂**，不偷偷给 `gpt-4o-mini`。
+**理由**：你要的是 `gpt-4o`。偷偷降级到 mini，输出质量变了你还以为是 4o 给的 —— 这就是骗人。
+
+### 预设乙：**同协议内降级**（推荐给 agent 用）
+
+```toml
 order = ["account", "provider", "model"]
-
-# 配置乙：便宜优先（先换便宜供应商，再降型号）
-order = ["provider", "account", "model"]
+[fallback.model]
+enabled = true
+chain = ["gpt-4o", "gpt-4o-mini"]     # 同家族内降一代
+require_same_protocol = true          # 不跳到 Claude/Gemini
 ```
 
-**为什么必须可配**：这两个顺序的语义完全不同 ——
-甲是「宁可贵也要保住能力」，乙是「宁可降能力也要省钱」。**没有绝对正确的顺序，只有场景**。
+**行为**：`gpt-4o` 全挂 → 降到 `gpt-4o-mini`（同协议，参数仍大致可用）→ 仍挂才失败。
+**响应里必须标 `route_source=model_downgrade` + `requested≠actual` 告警。**
 
-## 4.3 GUI 里怎么配
+### 预设丙：**尽力可用**（要开才生效）
 
-「切换策略」页：
-```
-切换顺序（拖拽排序）
-  1. [账号轮巡]  ≡      最多 3 次
-  2. [供应商切换] ≡     最多 2 家
-  3. [型号降级]  ≡      链: gpt-5 → gpt-4o → gpt-4o-mini  [编辑]
-     ☑ 账号轮巡  ☑ 供应商切换  ☑ 型号降级
-
-预设: [质量优先] [省钱优先] [自己配]
+```toml
+order = ["account", "provider", "model"]
+[fallback.model]
+enabled = true
+require_same_protocol = false         # 允许跨协议
+chain = ["gpt-4o", "claude-sonnet-4", "deepseek-chat"]
 ```
 
----
+**行为**：可以跳到 Anthropic 协议。**此时 agent 的思考参数会失效**（见 §三），
+但网关**不翻译、不报错**，只通过 `X-Gateway-Route-Actual` 告诉它实际用了谁。
+
+## 4.5 型号降级必须显式报「换了型号」
+
+跨型号是**能力变化**，不是「同型号换了个来源」。所以：
+
+```http
+X-Gateway-Route-Requested: gpt-4o
+X-Gateway-Route-Actual: gpt-4o-mini
+X-Gateway-Route-Source: model_downgrade
+X-Gateway-Route-Warning: model_changed=gpt-4o->gpt-4o-mini
+```
+
+body 的 `x_gateway` 里 `route_mismatch: true` + `model_changed: true`。
+
+**对比「同型号换供应商」则不算 mismatch**：
+```http
+X-Gateway-Route-Requested: openai-official/gpt-4o
+X-Gateway-Route-Actual: azure/gpt-4o
+X-Gateway-Route-Source: provider_switch
+# 没有 Route-Warning —— 型号没变，能力没变，只是换了来源
+```
+
+**为什么这个区别重要**：
+- 换供应商 → 你要的东西没变，只是从另一家买（可以不管）
+- 换型号 → **你要的东西变了**（必须知道）
+
+## 4.6 GUI 设置界面
+
+```
+┌─ 降级策略 ────────────────────────────────────────┐
+│                                                   │
+│  ☑ 账号轮巡        配额耗尽时换 key   最多 [3] 个  │
+│                                                   │
+│  ☑ 供应商切换      同型号，换一家     最多 [3] 家  │
+│     ★ 只换同型号的供应商（推荐，参数语义一致）      │
+│     优先顺序: 官方 → Azure → 中转A  [拖拽调整]     │
+│                                                   │
+│  ☐ 型号降级        换成别的型号       ← 默认不勾   │
+│     降级链: gpt-4o → gpt-4o-mini        [编辑]    │
+│     ☑ 只在同协议族内跳（不跨 Claude/Gemini）       │
+│                                                   │
+│  预设: [保守(默认)] [同协议内降级] [尽力可用]      │
+│                                                   │
+│  当前策略预览:                                     │
+│    gpt-4o(官方) → gpt-4o(Azure) → gpt-4o(中转A)   │
+│    → 失败返回 503（不降型号）                       │
+└───────────────────────────────────────────────────┘
+```
+
+**「当前策略预览」这一栏是关键** —— 用户不用脑补「我这样配会怎么走」，
+直接看到完整路径。
+
+## 4.7 与 §三 的关系（两句话讲清）
+
+| | 网关做什么 |
+|---|---|
+| **思考参数** | 完全不管，原样透传 |
+| **降级范围** | 默认限制在**同型号**内 —— 这就是保证参数有效的唯一手段 |
+
+**这样设计的好处**：网关不需要理解任何参数的含义，只需要**限制降级范围**，
+就保证了 agent 的参数不会因为降级而失效。**用「拓扑约束」代替「语义翻译」，后者永远做不全。**
+
 
 # 五、③④ Windows 桌面应用 + GUI
 
@@ -447,14 +558,21 @@ pyinstaller --onefile --windowed --name AIGateway \
 
 # 七、待 Master 拍板
 
+## 已被 Master 裁决解决的（不再是问题）
+
+| 原问题 | 裁决 |
+|---|---|
+| ~~思考档位定几档~~ | **不做** —— 思考强度整块不归网关（§三） |
+| ~~型号降级链自动推断还是手工配~~ | **默认不降型号** —— 手工配是唯一的开启方式（§4.3） |
+| ~~默认切换顺序质量优先还是省钱优先~~ | **保守为默认** —— 只换账号 + 同型号换供应商，绝不偷偷换型号（§4.4 预设甲） |
+
+## 剩余两项
+
 | # | 问题 | 我的推荐 |
 |---|---|---|
-| **1** | GUI 技术栈用 **PySide6**？还是你更想要 Tauri/Web 那种好看的？（代价：后端要改成子进程） | **PySide6**（后端零重写） |
-| **2** | 型号降级链要**自动推断**（按 generation 数字）还是**手工配置**？ | **手工配**（自动猜会出错，如 `gpt-4o-mini` 和 `gpt-4.1` 谁更弱不好判断） |
-| **3** | 默认切换顺序：**质量优先**（先换号换家、最后降型号）还是**省钱优先** | **质量优先** |
-| **4** | Windows 版本要求（Win10 / Win11 / 都要）？要不要同时保留 Linux 版 | 都是；**保留 Linux**（代码不变，只多一个打包目标） |
+| **1** | GUI 技术栈用 **PySide6**？还是你更想要 Tauri/Web 那种好看的？（代价：Python 后端要改成子进程） | **PySide6** —— 后端零重写，同进程直接调 |
+| **2** | Windows 版本要求（Win10 / Win11 / 都要）？要不要同时保留 Linux 版 | 都支持；**保留 Linux**（代码不变，只多一个打包目标） |
 
----
 
 *建立时间：2026-11-11 ｜ 协议矩阵与上游清单来自 New API 源码实测，非记忆*
 *思考强度整块不做 —— Master 最终裁决，见 §三*
