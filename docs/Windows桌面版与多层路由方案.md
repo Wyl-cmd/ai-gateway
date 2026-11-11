@@ -106,151 +106,249 @@ CREATE INDEX IF NOT EXISTS idx_provider_route_family ON provider_route(family, p
 
 ---
 
-# 三、⑤ 思考等级归一化（最大难点）
+# 三、⑤ 思考等级：**翻译，不调配**（按 New API / RelayKit 的做法）
 
-## 3.1 现实：各家参数形式完全不同（官方文档实测）
+> **2026-11-11 两次修正**：
+> 第一版我设计了「网关按 purpose 猜档位」→ Master 指出该让 agent 自己决定。
+> 第二版我改成「纯透传」→ **纯透传会静默失效**。
+> 第三版看 New API `relaykit/reasoning/`（2,845 行）后才定对：**翻译 + 报告**。
 
-| 家 / 代际 | 参数 | 取值形式 | 备注 |
-|---|---|---|---|
-| **OpenAI** o 系列 / GPT-5 | `reasoning_effort` | `minimal` / `low` / `medium` / `high` | 4 档枚举 |
-| **Anthropic** Claude ≤4.6 | `thinking: {type:"enabled", budget_tokens:N}` | **整数 token** | extended thinking |
-| **Anthropic** Claude 4.7+ | `thinking:{type:"adaptive"}` + `effort` | 枚举 | **extended thinking 已是 legacy** |
-| **Gemini 2.5** | `thinking_budget` | **整数**（0 = 关） | |
-| **Gemini 3+** | thinking **level** | 枚举 | **换了一套，2.5 和 3 不兼容** |
-| **Qwen** | `enable_thinking` | **bool** | 只有开/关，没有档位 |
-| **DeepSeek** | thinking mode | 独立参数 | 见官方 guides/thinking_mode |
+## 3.0 三条边界的最终定义
 
-**结论：不存在「统一档位」。** 所以必须做两件事：
+| 谁 | 做什么 | 不做什么 |
+|---|---|---|
+| **Agent** | 决定「我要多少思考」（用原生参数，或模型名后缀） | 不用管上游是谁、参数叫什么 |
+| **网关** | 把 agent 的表达**翻译**成目标上游能懂的参数；**翻译了什么、丢了什么全部报告** | **不替 agent 决定思考深度**；不按「用途」猜档位 |
+| 上游 | 按自己协议的参数执行 | — |
 
-1. **统一档位定义**（我们对外的口径）
-2. **每模型的映射表**（我们 → 上游）
+**为什么不能纯透传**：agent 按 Claude 格式发 `thinking: {budget_tokens: 16384}`，
+路由到 OpenAI 的 gpt-4o → 该字段被静默忽略 → **agent 以为在用高档思考，实际是默认档**。
+既不报错也没提示。**这是网关能犯的静默欺骗之一，必须由网关负责翻译。**
 
-## 3.2 统一档位（对外口径，5 档）
+## 3.1 七档统一口径（不是 5 档）
 
 ```python
-ThinkingLevel = Literal["off", "low", "medium", "high", "max"]
+Effort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]
 ```
 
-**为什么是这 5 档**（不是 4 也不是 6）：覆盖所有上游的取值空间 ——
-`off`（关）/ `low`（最快最省）/ `medium`（默认）/ `high`（多数模型最高档）/ `max`（只有部分支持）。
-再多的档位没有上游能兑现。
+这七档**不是我发明的**，是从 New API `reasoning/intent.go` 的常量照抄：
 
-## 3.3 映射表（每一行都是「实测过的参数形式」）
-
-```toml
-# ── 思考等级映射 ──
-# 按「上游协议类型」定义，不是按 provider 名 —— 同协议的所有 provider 共用
-
-[thinking_map.openai_reasoning]
-# OpenAI o 系列 / GPT-5 的 reasoning_effort（4 档枚举）
-off    = { omit = true }                 # 不支持关闭，直接不发这个字段
-low    = { reasoning_effort = "low" }
-medium = { reasoning_effort = "medium" }
-high   = { reasoning_effort = "high" }
-max    = { reasoning_effort = "high" }   # 上游只有 4 档，max 退化到 high
-
-[thinking_map.anthropic_budget]
-# Claude ≤4.6 的 budget_tokens（整数）
-off    = { thinking = { type = "disabled" } }
-low    = { thinking = { type = "enabled", budget_tokens = 1024 } }
-medium = { thinking = { type = "enabled", budget_tokens = 4096 } }
-high   = { thinking = { type = "enabled", budget_tokens = 16384 } }
-max    = { thinking = { type = "enabled", budget_tokens = 32000 } }
-# 约束：budget_tokens 必须 < max_tokens
-
-[thinking_map.anthropic_adaptive]
-# Claude 4.7+ 的 adaptive + effort
-off    = { thinking = { type = "disabled" } }
-low    = { thinking = { type = "adaptive" }, effort = "low" }
-medium = { thinking = { type = "adaptive" }, effort = "medium" }
-high   = { thinking = { type = "adaptive" }, effort = "high" }
-max    = { thinking = { type = "adaptive" }, effort = "high" }
-
-[thinking_map.gemini_budget]
-# Gemini 2.5 的 thinking_budget（整数）
-off    = { thinking_budget = 0 }
-low    = { thinking_budget = 1024 }
-medium = { thinking_budget = 8192 }
-high   = { thinking_budget = 24576 }
-max    = { thinking_budget = 32768 }
-
-[thinking_map.gemini_level]
-# Gemini 3+ 的 level（换了一套）
-off    = { thinking_level = "off" }
-low    = { thinking_level = "low" }
-medium = { thinking_level = "medium" }
-high   = { thinking_level = "high" }
-max    = { thinking_level = "high" }
-
-[thinking_map.boolean]
-# Qwen 等只有开关的
-off    = { enable_thinking = false }
-low    = { enable_thinking = true }
-medium = { enable_thinking = true }
-high   = { enable_thinking = true }
-max    = { enable_thinking = true }
+```go
+EffortNone / EffortMinimal / EffortLow / EffortMedium / EffortHigh / EffortXHigh / EffortMax
 ```
 
-## 3.4 「不同模型分类不一样」怎么处理（Master 这条问得最准）
+`xhigh` 是「比 high 更强但还不到 max」的档，实际有上游能兑现（不是凑数档）。
 
-**事实**：有的模型 4 档、有的 2 档（开/关）、有的连续（token 数）。
+## 3.2 核心抽象：`Intent` 对象，不是静态映射表
 
-**处理三步**：
-
-### ① 每个 `provider_route` 声明自己的 `thinking_mode`
-
-```sql
-thinking_mode TEXT   -- "openai_reasoning" | "anthropic_budget" | "anthropic_adaptive"
-                     -- | "gemini_budget" | "gemini_level" | "boolean" | NULL(不支持)
-```
-
-`NULL` = 该模型完全不支持思考等级 → 任何档位请求都**忽略且不报错**，但在响应里
-`thinking_applied=false`（**明确告知降级，不假装生效**）。
-
-### ② 降级时按「实际能兑现的档位」算，不是按请求的档位
+**静态映射表（我第一版的设计）在多跳转换时每跳都丢精度**。New API 用「意图对象 + 双向 apply」：
 
 ```
-用户请求 high
-  → 选中的 route 是 boolean 型（只有开关）
-  → 实际只能用 "on"
-  → 响应里写 thinking_requested=high, thinking_applied=high_equivalent_boolean,
-     thinking_degraded=true
+           ┌── FromOpenAIChat()      ─┐
+输入（四选一）├── FromOpenAIResponses() ─┤   Intent（跨协议中间表达，带精确 budget 数值）
+           ├── FromClaude()          ─┤        │
+           └── FromGemini()          ─┘        ├──→ ApplyToOpenAIChat()
+                                               ├──→ ApplyToOpenAIResponses()
+                                               ├──→ Claude 的 max_tokens/budget 调整
+                                               └──→ Gemini 的 thinkingConfig 归一化
 ```
 
-**这是关键**：不告诉用户「你要的 high 在这家只能做到开关」，用户会以为拿到了高档思考。
+**`Intent` 要带的不只是「档位名」，还有精确数值**：
+- `effort`: 七档之一
+- `budget_tokens`: 精确 token 数（Claude/Gemini 用）
+- `include_thoughts`: 是否回传思考内容
+- `source`: 这个意图从哪个协议解析出来的（诊断用）
 
-### ③ 跨模型降级时，档位往上取
+**为什么必须带数值**：Claude 的 `budget_tokens: 16384` 转成 OpenAI 的 `effort` 会丢精度，
+再转回 Gemini 的 `budget` 就还原不回 16384 了。带原值才能在「圆了一圈」的场景下保真。
 
-如果从 `gpt-5`（4 档）降到 `qwen`（boolean），`medium` → `true`（够用即可，不硬凑）。
-如果从 `qwen` 升到 `gpt-5`，`true` → `medium`（**不默认给 high**，避免突然变慢变贵）。
+## 3.3 agent 的三种表达方式（按优先级）
 
-## 3.5 不同 agent 调配不同思考等级（Master 这个需求怎么满足）
+### ① 模型名后缀（最简，推荐给 agent 用）
 
-**入口设计**（三种，按优先级）：
+**agent 不用记各家参数格式**，直接在模型名后加后缀：
 
-```http
-# ① 显式指定（最优先）
-X-Gateway-Thinking: high
-
-# ② 按用途预设（agent 声明"我在干什么"，网关选档）
-X-Gateway-Purpose: code_gen | quick_qa | deep_analysis | tool_call
-
-# ③ 不指定 → 用该模型的默认档（默认 medium）
+```
+gpt-5-high            → gpt-5  + reasoning_effort=high
+claude-opus-4-max     → claude + budget_tokens=最大
+deepseek-v4-low       → deepseek + effort=low
+gemini-3-pro-xhigh    → gemini + thinkingConfig 最高档
 ```
 
-**用途预设映射**（可配）：
+**各家的后缀集合不同**（这是实测，不是统一列表）：
 
-| purpose | thinking | 理由 |
+```go
+EffortSuffixes           = ["-max","-xhigh","-high","-medium","-low","-minimal"]
+OpenAIEffortSuffixes     = ["-max","-xhigh","-high","-medium","-low","-minimal","-none"]
+DeepSeekV4EffortSuffixes = ["-none","-low","-max"]        // DeepSeek 只有三档
+```
+
+**为什么这个设计对 agent 最友好**：agent 只需要会说「high」，不需要知道
+OpenAI 叫 `reasoning_effort`、Claude 叫 `budget_tokens`、Qwen 叫 `enable_thinking`。
+
+### ② 原生参数（agent 自己知道协议时用）
+
+```json
+// OpenAI 格式
+{"model": "gpt-5", "reasoning_effort": "high"}
+
+// Claude 格式
+{"model": "claude-opus-4", "thinking": {"type": "enabled", "budget_tokens": 16384}}
+
+// Gemini 格式
+{"model": "gemini-3-pro", "generationConfig": {"thinkingConfig": {"thinkingBudget": 24576}}}
+```
+
+网关原样解析成 `Intent`。
+
+### ③ 两者都有 → `MergeExplicitAndSuffix`
+
+**冲突规则**（照抄 New API `MergeExplicitAndSuffix`）：显式参数优先，后缀作为补充；
+冲突时返回诊断 `explicit_overrides_suffix`，不静默改。
+
+## 3.4 「不同模型分类不一样」怎么处理
+
+**处理方式从「映射表」改为「三个 apply 函数各自适配」**：
+
+| 上游 | 适配逻辑（New API 实测） |
+|---|---|
+| **OpenAI** | 直接吃 `reasoning_effort`（七档里 `none`/`minimal` 部分模型不支持 → 降级并诊断） |
+| **Claude** | `budget_tokens` **超出模型范围自动调小**，返回诊断 `claude_budget_adjusted`；`max_tokens` 不够时自动抬高，返回 `claude_max_tokens_raised` |
+| **Gemini** | `thinkingConfig` **按模型归一化**（2.5 用 budget / 3+ 用 level，两套不兼容） |
+| **Qwen 等只有开关的** | `enable_thinking: true/false`，`effort` 精细度丢失 → 诊断 `effort_collapsed_to_boolean` |
+| **不支持思考的模型** | 忽略该参数 → 诊断 `reasoning_not_supported`，**响应里明确标出，不假装生效** |
+
+**共同点：所有「做不到完全匹配」的地方，都以诊断返回，不静默吞掉。**
+
+## 3.5 七档 × 上游的兑现表（哪些档实际能兑现）
+
+| 上游 | none | minimal | low | medium | high | xhigh | max |
+|---|---|---|---|---|---|---|---|
+| OpenAI o/GPT-5 | 部分 | ✅ | ✅ | ✅ | ✅ | ❌降 high | ❌降 high |
+| Claude ≤4.6 | ✅关 | ✅1024 | ✅1024 | ✅4096 | ✅16384 | ~24576 | ✅32000 |
+| Claude 4.7+ | ✅关 | ? | ✅ | ✅ | ✅ | ? | ~ |
+| Gemini 2.5 | ✅0 | ✅1024 | ✅1024 | ✅8192 | ✅24576 | ~ | ✅32768 |
+| Gemini 3+ | ✅off | ? | ✅ | ✅ | ✅ | ? | ~ |
+| Qwen | ✅false | ⚠️true | ⚠️true | ⚠️true | ⚠️true | ⚠️true | ⚠️true |
+
+`~` = 需实测确认（**本文档不假装知道**）；`⚠️` = 退化成二值。
+
+**这张表的意义**：agent 要 `xhigh`，路由到的上游没有这档 → 降级兑现 + 诊断，
+**而不是假装给了 xhigh**。
+
+## 3.6 实现范围（首版）
+
+| 项 | 首版做 | 后续 |
 |---|---|---|
-| `quick_qa` | `off` 或 `low` | 闲聊、简单问答，思考纯浪费 |
-| `tool_call` | `low` | 工具调用要快，不需要长思考 |
-| `code_gen` | `medium` | 写代码要一定推理 |
-| `deep_analysis` | `high` | 漏洞分析、架构设计 |
+| `Intent` 对象 + 七档 | ✅ | |
+| `From{OpenAI Chat, OpenAI Responses, Claude, Gemini}` | ✅ 四种 | |
+| `Apply{OpenAI Chat, OpenAI Responses, Claude, Gemini}` | ✅ 四种 | |
+| 模型名后缀解析（支持各家不同后缀集） | ✅ | |
+| `MergeExplicitAndSuffix` | ✅ | |
+| 诊断码（`claude_budget_adjusted` 等） | ✅ | |
+| 多跳路径的 Intent 透传 | ✅（Claude↔Gemini 走两跳） | |
 
-**为什么需要 ②**：agent 自己最清楚「这一步要不要深想」。让 agent 声明用途，
-比让它猜「high 会不会太慢」更自然。
+**这就是 `relaykit/reasoning/` 的 Python 重写**（Go 2,845 行含测试，纯实现约 1,800 行）。
 
----
+
+# 三·五、接口协议支持矩阵（Master 要求：覆盖市面主流协议）
+
+> 依据：`QuantumNous/new-api`（50k stars）的 `relaykit/` 模块实测 + `relay/channel/` 40 个上游
+
+## 3.5.1 四种**接入/转发协议**（两两可转）
+
+RelayKit 的核心是「四种协议任意两种之间转换」，请求 / 非流式响应 / 流式事件全覆盖：
+
+| 源 \ 目标 | OpenAI Chat | OpenAI Responses | Claude Messages | Gemini |
+|---|---:|---:|---:|---:|
+| **OpenAI Chat** | — | `good` | `fair` | `fair` |
+| **OpenAI Responses** | `good` | — | `fair` | `fair` |
+| **Claude Messages** | `fair` | `fair` | — | `discouraged` |
+| **Gemini** | `fair` | `fair` | `discouraged` | — |
+
+- `good` —— 两种协议结构接近，字段基本一一对应
+- `fair` —— 主要内容都能转，**协议独有的字段以诊断报告**
+- `discouraged` —— Claude ↔ Gemini 请求和响应都经 OpenAI Chat 中转**两跳**，丢字段的机会更多
+
+**转换结果必须带三样东西**（照 RelayKit）：
+1. `steps` —— 实际经过的每一跳（`["claude→oai_chat", "oai_chat→gemini"]`）
+2. `quality` —— 本次转换的质量等级（good/fair/discouraged）
+3. `diagnostics` —— 转换过程里的所有改动与丢失（见 3.5.3）
+
+**为什么必须报告 `steps`**：同一对协议可能有直接转换器和两跳路径，
+用户看到 `discouraged` 才知道「这次结果丢了字段，别全信」。
+
+## 3.5.2 四十个上游 channel（`relay/channel/`）
+
+New API 支持的上游，按协议族分类：
+
+| 协议族 | 上游 |
+|---|---|
+| **OpenAI 兼容**（最大类） | openai / deepseek / moonshot / minimax / mistral / cohere / perplexity / openrouter / siliconflow / jina / ai360 / dify / coze / ollama / replicate / submodel |
+| **Anthropic** | claude |
+| **Gemini** | gemini / vertex |
+| **国内云** | ali（阿里通义）/ baidu / baidu_v2 / tencent（混元）/ volcengine（豆包） |
+| **国际云** | aws（Bedrock）/ cloudflare / palm |
+| **特殊协议** | jimeng（即梦图像）/ codex / sub2api / mokaai / advancedcustom（自定义） |
+
+**我们的首版不做 40 个。** 原因和原方案一致：**协议族只有 4 类**，同一协议族内的
+不同上游只是在 base_url、鉴权方式、模型名映射上有差别 —— 这些用配置表达，不需要各写一个适配器。
+
+**首版策略**：
+```
+转发协议：4 种全支持（OpenAI Chat / OpenAI Responses / Claude / Gemini）
+上游接入：先用 8 个覆盖 4 个协议族
+  openai        （OpenAI 兼容族基类）
+  deepseek      （OpenAI 兼容，国内主力）
+  claude        （Anthropic 族）
+  gemini        （Gemini 族）
+  vertex        （Gemini 族，企业端点）
+  aws_bedrock   （Claude/Gemini 混，特殊鉴权）
+  ali           （OpenAI 兼容，国内）
+  advanced_custom（自定义，配 JSON 路径映射，覆盖所有长尾）
+```
+
+**`advanced_custom` 是关键**：一个「用户可配 JSON 路径映射」的通用适配器，
+能把剩下 30 多个上游都接进来**而不写代码**。这是 New API 的做法（`relay/channel/advancedcustom/`），直接抄。
+
+## 3.5.3 诊断码清单（转换丢失必须可见）
+
+**照抄 RelayKit 的诊断机制** —— 每一次「改动了用户的数据」都产生一条诊断：
+
+| 诊断码 | 什么时候 |
+|---|---|
+| `claude_budget_adjusted` | Claude 的 `budget_tokens` 超出模型范围被调整 |
+| `claude_max_tokens_raised` | `max_tokens` 不够容纳 budget 被抬高 |
+| `effort_collapsed_to_boolean` | 目标只支持开关，七档精细度丢失 |
+| `effort_downgraded_unsupported` | 目标没有该档（如 OpenAI 无 `xhigh`）→ 降级兑现 |
+| `reasoning_not_supported` | 目标完全不支持思考参数 → 忽略 |
+| `field_dropped_on_hop` | 多跳转换中某个独有字段无法表达 |
+| `tool_reencoded` | 工具定义按目标协议重新编码（如 Responses 的 custom tool → function tool） |
+| `image_url_fetch_required` | 需要宿主下载 URL 才能转多模态 |
+
+**每条诊断带三样**：`code` / `message`（人话）/ `path`（哪个字段）。
+
+**全部塞进响应头一个字段**（简版）+ body（完整版）：
+```http
+X-Gateway-Conversion: quality=fair,steps=2,diagnostics=claude_budget_adjusted,field_dropped_on_hop
+```
+
+## 3.5.4 首版实现范围
+
+| 项 | 首版 | 理由 |
+|---|---|---|
+| 四种协议解析/生成 | ✅ | Master 明确要主流协议 |
+| 四种协议两两转换 | ✅ | 12 个方向（含多跳） |
+| 流式事件转换 | ✅ | 不做流式等于不能用 |
+| 工具调用转换 | ✅ | agent 场景必备 |
+| 多模态（图片/文件） | ⚠️ 部分 | 先支持 base64 data URL，URL 下载后置 |
+| Usage 统一 | ✅ | 计费要用 |
+| 诊断码 | ✅ | 不报告丢字段等于骗人 |
+| 8 个上游 + advanced_custom | ✅ | 覆盖 4 协议族 + 长尾可配 |
+
+**约 1,800~2,200 行 Python**（对应 RelayKit 的 Go 实现 3,600 行左右，去掉 Go 特有样板）。
+
+**这是本项目最大的一块工作量** —— 比破甲层（1,981 行）还大。
 
 # 四、② 四维切换策略（GUI 可配）
 
