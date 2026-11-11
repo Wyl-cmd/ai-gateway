@@ -74,7 +74,19 @@
       毫秒级                秒级（LLM 生成）
 ```
 
-**瓶颈在上游**。Python asyncio + httpx 处理 SSE 流式转发，单机几千并发没有压力。
+**瓶颈在上游**。Python asyncio + httpx 处理 SSE 流式转发，单机**几百 QPS** 对自用场景绰绰有余。
+
+**但别把结论写过头**：SQLite（WAL 模式）是**多读单写**。每次请求至少要写
+`request_log` + `attempt_log`（破甲时可能多条）+ `budget_ledger` —— **写是串行的**，
+checkpoint 时的 fsync 会先成为瓶颈，远早于 CPU 或网络。
+
+| 场景 | 判断 |
+|---|---|
+| 自用（每秒几次请求） | ✅ 完全够用，SQLite 是最省事的选择 |
+| 小团队（每秒几十次） | ⚠️ 要调 `wal_autocheckpoint`、把日志表改批量写 |
+| 每秒上百次 | ❌ SQLite 顶不住，要换 Postgres |
+
+**准确的说法是「Python 不是瓶颈，SQLite 单写者会先到天花板」** —— 不是「几千并发没压力」。
 「Python 慢」在 IO 密集型场景是**伪问题**——慢在 CPU 密集（自己做推理）才成立。
 
 ## 依赖选型
@@ -287,9 +299,39 @@ L1  改 query 的编码   → query 变形后发送
 
 | 过滤 | 规则 | 为什么 |
 |---|---|---|
-| **语言** | 中文 query → 排除 Rot13/Leetspeak/Disemvowel/Reverse | 英文变形对中文无效 |
+| **语言** | 中文 query → 排除 Rot13 / Leetspeak / Disemvowel / Reverse / Morse / CaserExpert / AsciiExpert | 英文变形对中文无效 |
 | **内容类型** | 含代码 → 优先 CodeChameleon 类；短 query → 优先 Base64 | 技术内容绑定 |
-| **历史有效性** | 查「模型 × 技术」历史成功率，高的优先 | 见下 |
+| **历史有效性** | 查「模型 × 技术」历史成功率，高的优先 | 见 §「技术有效性记忆」 |
+
+### ⚠️ 中文场景的实际可用技术数（明说，不藏在规则里）
+
+**25 种规则型里，对中文真正有效的约 13 种，不是 25 种。**
+
+| 中文无效（8 种） | 为什么 |
+|---|---|
+| `Rot13` | 只对拉丁字母做位移，中文不变 |
+| `Leetspeak` | 用数字替换英文字母 |
+| `Disemvowel` | 去的是英文元音 |
+| `CaserExpert` | 中文没有大小写 |
+| `AsciiExpert` | ASCII 编码对中文字符无意义 |
+| `MorseExpert` | 摩斯电码是英文/数字编码 |
+| `Reverse` | 字符倒序对中文语序破坏后模型无法理解 |
+| `Base64_raw` | 依赖原始字节的 ASCII 假设 |
+
+| 中文可用（约 13 种） | 说明 |
+|---|---|
+| `Base64` / `Base64_input_only` | 字节级编码，任何语言都行 |
+| `Translate` | 中文 → 小语种（对中文场景反而最有效之一） |
+| `SelfDefineCipher` | 自定义密码表，可映射中文 |
+| `OddEven` / `Length` / `BinaryTree` | 结构类，语言无关 |
+| `MJPChoices` | 多选包装，语言无关 |
+| `ReplaceWordsWithSynonyms` | 中文同义词替换 |
+| `Auto_payload_splitting` / `Auto_obfuscation` | 拆分/混淆，语言无关 |
+| `Combination_1/2/3` / `Crossover` | 组合技，取决于组合对象 |
+
+**这条要写在文档里的原因**：如果只在选择器规则里写「中文排除那 7 个」，
+读者会以为「25 种技术全都能用」。实际中文场景的 L1 只有 13 种可选 ——
+**这直接影响「L1 全试也不慢（<100ms）」这个论断的乐观程度**（实际更快，但可试的更少）。
 
 ### 我们要自己做、EasyJailbreak 没有的：技术有效性记忆
 
@@ -495,6 +537,50 @@ ORDER BY success_rate DESC;
 
 **为什么 `HAVING n >= 5`**：1/1 的 100% 没有统计意义，拿它排序会让新技术的偶然成功误导策略。
 
+### ⚠️ 冷启动悖论（这个门槛自带的问题，必须明说）
+
+`n >= 5` × 25 种技术 = **至少 125 次「被拒后重试」的样本才能把矩阵建起来**。
+
+| 使用强度 | 建起矩阵要多久 | 实际表现 |
+|---|---|---|
+| 重度（每天 50+ 次拒绝） | 约 2~3 天 | 矩阵收敛，选技术越来越准 |
+| 中度（每天 10 次拒绝） | 约 2 周 | 半个月后才开始「越用越快」 |
+| 低频（每天 2~3 次拒绝） | **可能永远建不起来** | **永远走先验顺序，等于没有记忆** |
+
+**所以「越用越快」这句话对低频用户是不成立的** —— 不解决就是自欺。
+
+### 解法：三层，先验兜底
+
+**① 内置先验（不依赖任何数据，装了就有）**
+
+按「技术大类」给默认顺序，不是按具体技术瞎排：
+
+```
+编码类（成功率最高，优先全试）：base64 → rot13 → leetspeak → reverse → morse
+模板类（次之）：deepinception → jailbroken-18 条 → ica → catastrophic
+重写类（要花钱，最后）：rephrase → change_style
+```
+
+**这个顺序是硬编码常量，`technique_prior` 表空的时候就用它。**
+
+**② 随用随学（`n >= 5` 才覆盖先验）**
+
+某个「模型 × 技术」攒够 5 次样本后，用实测成功率覆盖先验位置。样本不够时先验优先。
+
+**③ 明说收敛条件**
+
+文档里写清楚：**矩阵只对重度使用收敛；低频用户靠先验，别指望记忆**。
+不写这句，等于承诺了一个我们做不到的能力。
+
+### 为什么不从公开评估数据导入先验
+
+EasyJailbreak / garak 论文里的 ASR（Attack Success Rate，攻击成功率）是在
+**特定模型（GPT-3.5/4）+ 特定数据集（AdvBench 等）**上测的。直接搬过来会误导 ——
+我们的模型、查询分布、语言（中文为主）都不同，搬别人的成功率等于用别人的体检报告给自己开药。
+
+**内置先验只编码「技术大类的相对顺序」（哪个大类更可能有效），不编码具体数值。**
+这个颗粒度的先验是跨模型稳定的，具体数值则不是。
+
 ## 6.3 `request_log` —— 每次请求一行
 
 ```sql
@@ -532,6 +618,29 @@ CREATE TABLE IF NOT EXISTS technique_prior (
 
 `attempt_log` 是**明细**（append-only 不删），`technique_prior` 是**聚合缓存**（定期重算）。
 
+## 6.5 `budget_ledger` —— 成本账本（成本预算硬门的数据基础）
+
+```sql
+CREATE TABLE IF NOT EXISTS budget_ledger (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    window_start  INTEGER NOT NULL,    -- 窗口起点（按 hourly/daily/monthly 取整）
+    request_id    TEXT NOT NULL,
+    provider      TEXT NOT NULL,
+    model         TEXT NOT NULL,
+    input_tokens  INTEGER NOT NULL,
+    output_tokens INTEGER NOT NULL,
+    cost_usd      REAL NOT NULL,       -- 按 pricing 表算出；无价目记 0
+    ts            INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_budget_window ON budget_ledger(window_start);
+```
+
+**为什么和 `request_log` 分开**：`request_log` 是「一次请求一行」（含 trace/破甲/路由），
+`budget_ledger` 是「一次上游计费一行」。**破甲重试会调多次上游，一次请求产生多条计费记录** ——
+混一张表就没法按请求统计成本，也没法按窗口求和。
+
+**成本怎么算**：查 `[[providers.pricing]]` 价目表（§七）；没配价目的模型成本记 0，见 §8.3 边界情形。
+
 ---
 
 # 七、配置格式
@@ -561,7 +670,7 @@ lease_seconds        = 30
 [jailbreak]
 enabled     = true          # 默认开
 start_level = 1             # 直接进 L1（L0 总是先加）
-max_level   = 2             # 默认到 L2；3/4 需显式开
+max_level   = 2             # 硬上限（优先级最高，会短路 l3/l4，见下）
 ladder_timeout_ms = 12000
 
 [l3]
@@ -580,6 +689,13 @@ extra_phrases = []
 
 > （原 [compress] 配置段已删除 —— 压缩层不做，理由见 §5.3）
 
+[budget]
+enabled      = false        # 默认关 —— 不开则只记账不拦
+window       = "daily"      # hourly | daily | monthly
+limit_usd    = 1.00
+on_exceed    = "downgrade"  # warn | downgrade | reject（见 §8.3）
+downgrade_to = ["deepseek-chat"]   # on_exceed=downgrade 时按顺序试的目标
+
 [auth]
 gateway_keys = []           # 空 = 不鉴权（仅 127.0.0.1 安全）
 
@@ -592,6 +708,12 @@ enabled = true
   key_id  = "ds-main"       # 只是标识
   key_env = "DEEPSEEK_API_KEY"   # 真 key 从环境变量读
   quota   = "unlimited"
+
+  # 价目表（成本预算硬门用）。无 pricing 的模型 → 成本记 0，budget 到线时按「未知成本」处理
+  [[providers.pricing]]
+  model         = "deepseek-chat"
+  input_per_1k  = 0.00027
+  output_per_1k = 0.0011
 
 [[providers]]
 name    = "openai"
@@ -612,6 +734,26 @@ enabled = false
 | `[[providers.accounts]]` 数组 | 多账号天然支持（配额耗尽换号） |
 | `w_cost = 0.0` 默认 | 不偷偷省钱 |
 | `max_level = 2` 默认 | L3 花钱、L4 很慢，默认不碰 |
+
+### `max_level` 与 `[l3].enabled` / `[l4].enabled` 的优先级（写死，避免歧义）
+
+**`max_level` 是硬上限，先判；`[l3]/[l4].enabled` 是软开关，在上限允许范围内再判。**
+
+```python
+effective_max = min(
+    max_level,                          # ① 硬上限，永远第一优先
+    3 if l3.enabled else 2,             # ② l3 关着 → 天花板就是 L2
+    4 if l4.enabled else 3,             # ③ l4 关着 → 天花板是 L3
+)
+```
+
+**所以 `max_level = 2` + `[l3].enabled = true` 的实际结果仍是「最高到 L2」** ——
+`max_level` 直接短路 `l3` 开关。反过来 `max_level = 4` 但 `[l3].enabled = false`，
+结果是「最高到 L2」（因为 l3 关了 → 天花板 2；l4 就算开了也够不到）。
+
+**为什么这样设计**：`max_level` 是「我最多接受花多少钱/多久」的**安全阀**，
+必须能一票否决；`[l3]/[l4].enabled` 是「这档要不要参与」的**功能开关**，只能在上限内生效。
+如果反过来（开关能突破上限），一个误配 `[l3].enabled=true` 就能让 `max_level=2` 失效 —— 安全阀不该被功能开关推翻。
 
 ---
 
@@ -668,6 +810,28 @@ X-Gateway-Levels-Tried: identity,rot13,base64
 {"error": {"type": "no_healthy_route", "message": "openai 所有账号不可用，且 fallback=strict"}}
 ```
 
+## 8.3 成本预算的三种触发行为
+
+`[budget].on_exceed` 决定超预算时做什么。**判定时机：进入路由层之前**（不知道成本就没法选）。
+
+| `on_exceed` | 行为 | 响应头 |
+|---|---|---|
+| `warn` | 只记日志，请求照常走原路由 | `X-Gateway-Budget: used=1.02/1.00 window=daily state=warning` |
+| `downgrade` | 按 `downgrade_to` 顺序找第一个可用模型；全不可用则退化为 `warn` | `X-Gateway-Budget: ... state=downgraded to=deepseek-chat` |
+| `reject` | 直接返 429 `budget_exceeded`，不调上游 | 错误体带 `used` / `limit` / `resets_at` |
+
+`X-Gateway-Budget` 头：`[budget].enabled=false` 时不出现；启用后**每次请求都带**（未超也带
+`state=ok`），客户端能自己看到余量。
+
+### 三个边界情形（都要有测试）
+
+1. **模型无价目** → 成本记 0，头里 `state=unknown_pricing`，**不因此拦请求**
+   （不知道多少钱就不该假装知道），但仍记账本（`cost_usd=0`）
+2. **窗口滚动** → 跨过边界后 `used` 归零。按 `window_start` 查账本，**不用内存计数器**
+   （重启不丢、多进程一致）
+3. **破甲重试的计费** → 一次请求内多次上游调用**每次都计费**，累加为同一 `request_id` 下
+   多条 `budget_ledger`。所以「一次请求可能比整个预算还贵」—— 到线判定看**窗口累计**，不看单请求
+
 ## 其他端点
 
 - `POST /v1/messages`（Anthropic 兼容）
@@ -708,7 +872,7 @@ G9 CLI 挂最后
 | **G4-J5** | 技术有效性记忆 | J2, G1 | 2 |
 | **G4-J6** | 生成型 5 个 | J1 | 6 |
 | **G4-J7** | L4 PAIR/TAP | J6 | 3 |
-| **G6** | 可观测（route_trace + 归因） | G3/G4/G5 | 2 |
+| **G6** | 可观测（route_trace + token 计量 + 成本账本 + 预算硬门） | G1/G3/G4 | 4 |
 | **G7** | 模式层 | G3 | 2 |
 | **G8** | 接入层 | 全部上层 | 3 |
 | **G9** | CLI | G8 | 1 |
@@ -835,7 +999,7 @@ NOT_REFUSALS = [
 **判据**：`0 failed`。任何一条红都必须解释清楚（真 bug 还是测试口径错），
 **不许 `-k` 跳过、不许 `--deselect`、不许改断言迁就实现**。
 
-## 测试规划约 111 条（原 119 减去压缩的 8 条）
+## 测试规划约 115 条（119 − 8 压缩 + 4 预算）
 
 | 批 | 文件 | 条数 |
 |---|---|---|
@@ -852,6 +1016,7 @@ NOT_REFUSALS = [
 | G6 | `test_observability.py` | 5 |
 | G7 | `test_mode.py` | 6 |
 | G8 | `test_ingress.py` | 8 |
+| G6 | `test_budget.py` | 4 |
 | G9 | `test_cli.py` | 4 |
 | G10 | `tests/e2e/test_live.py` | 5 |
 
@@ -1005,6 +1170,10 @@ NOT_REFUSALS = [
 | **可解释路由 `route_trace`** | 三家都只给结果 | 每次返回候选集 + 每个被排除的原因 + 最终依据 | 出问题不用猜 |
 | **技术有效性记忆** | EasyJailbreak 是评估工具，不关心「怎么最快过」 | 「模型 × 技术 成功率矩阵」，下次优先高成功率 | 从「每次从头试」到「越用越快」 |
 | **成本预算硬门** | 三家都只有事后统计 | 预算到线就降级/拒绝，不是超了才告警 | 不超支 |
+
+> **本条的四块落地位置**（避免「只写在目录里」）：
+> 配置段 `[budget]` + 价目表 `[[providers.pricing]]`（§七）｜账本表 `budget_ledger`（§6.5）｜
+> 三种降级行为与响应头（§8.3）｜测试 `test_budget.py` 4 条（§十）
 | **route_trace 可回放** | 无 | 存决策输入快照，能按原样重放一次路由 | 回归测试 |
 
 ---
