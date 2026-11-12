@@ -106,6 +106,36 @@ def test_openai_transform_response_取第一个_choice():
     assert out["usage"]["completion_tokens"] == 5
 
 
+def test_openai_解析思考模型的_reasoning_content():
+    """思考模型（deepseek-flash / o1 / qwq）把思考放在 reasoning_content，
+    content 只有最终答案。不取它会导致 max_tokens 小时 content 为空，
+    被上层误判成「拒绝」然后无意义重试。
+    """
+    raw = {
+        "choices": [{
+            "message": {"role": "assistant", "content": "",
+                        "reasoning_content": "用户想问的是…"},
+            "finish_reason": "length",
+        }],
+        "usage": {"prompt_tokens": 34, "completion_tokens": 20, "total_tokens": 54,
+                  "completion_tokens_details": {"reasoning_tokens": 20}},
+    }
+    out = OpenAIAdaptor().transform_response(raw)
+    assert out["reasoning"] == "用户想问的是…"
+    assert out["content"] == ""
+    assert out["finish_reason"] == "length"
+    # usage 必须完整，否则对账对不上
+    assert out["usage"]["prompt_tokens"] == 34
+    assert out["usage"]["reasoning_tokens"] == 20
+
+
+def test_普通模型没有_reasoning_字段时为空串():
+    raw = {"choices": [{"message": {"content": "你好"}, "finish_reason": "stop"}],
+           "usage": {}}
+    out = OpenAIAdaptor().transform_response(raw)
+    assert out["reasoning"] == ""
+
+
 def test_anthropic_transform_response_拼接_content_块():
     """Anthropic 的 content 是 block 数组，要拼成一段文本。"""
     raw = {

@@ -311,6 +311,31 @@ def create_app(deps: GatewayDeps) -> FastAPI:
                 if not jb_enabled:
                     return _respond(content, result, cand, trace, level, t_start, deps)
 
+                # 被 max_tokens 截断时 content 为空 —— 这是**长度不够**，不是拒绝。
+                # 重试同一个 max_tokens 只会再空一次，白烧 6 次请求。
+                # 实测踩到：deepseek-flash 是思考模型，20 个 token 全花在
+                # reasoning_content 上，content 为空 → 被判「空回答=拒绝」→ 重试 6 次。
+                if (not content.strip()
+                        and result.get("finish_reason") == "length"):
+                    trace.add_error(
+                        "被 max_tokens 截断（不是拒绝）：content 为空但 finish_reason=length，"
+                        "重试无意义 —— 需要调大 max_tokens"
+                    )
+                    # 截断也要记战绩：不然 J5 永远学不到「这个技术会让模型
+                    # 想太久导致超长」，下次还会选它
+                    if deps.memory is not None:
+                        try:
+                            deps.memory.record_attempt(
+                                request_id=f"{trace.requested}-{attempt}",
+                                model=cand.model, level=level, technique=tech_name,
+                                ok=False, refusal_kind="truncated",
+                                latency_ms=int((time.perf_counter() - t_up) * 1000),
+                            )
+                        except Exception:       # noqa: BLE001
+                            pass
+                    return _respond(content, result, cand, trace, level,
+                                    t_start, deps)
+
                 t_det = time.perf_counter()
                 verdict = detect(content)
                 trace.stage(TraceStage.DETECT, (time.perf_counter() - t_det) * 1000)
@@ -357,6 +382,9 @@ def create_app(deps: GatewayDeps) -> FastAPI:
                      source="auto_route" if d.mode == "auto" else d.policy)
 
         payload = _to_openai_shape(content, result.get("finish_reason"), cand.model)
+        # 思考过程也带上 —— 前端/CLI 可以选择显示，不显示也不能丢
+        if result.get("reasoning"):
+            payload["choices"][0]["message"]["reasoning_content"] = result["reasoning"]
         usage = result.get("usage") or {}
         payload["usage"] = {
             "prompt_tokens": int(usage.get("prompt_tokens", 0) or 0),

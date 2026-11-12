@@ -266,6 +266,52 @@ async def test_流式逐块透传():
 
 
 # ═══════════════════════════════════════════════════════════════
+# ④b 被 max_tokens 截断 ≠ 拒绝（真跑抓到的 bug）
+# ═══════════════════════════════════════════════════════════════
+@pytest.mark.asyncio
+async def test_被截断的思考模型不触发无意义重试():
+    """实测踩到：deepseek-flash 是思考模型，max_tokens=20 全花在
+    reasoning_content 上，content 为空 → detect 判「空回答=拒绝」→ 重试 6 次，
+    每次都空，白烧 6 次请求还返回 0 usage。
+
+    finish_reason=length 说明是**长度不够**，重试同一个 max_tokens 毫无意义。
+    """
+    def responder(i, unified):
+        return {"content": "", "reasoning": "想了很久",
+                "finish_reason": "length", "usage": {"prompt_tokens": 34,
+                                                     "completion_tokens": 20,
+                                                     "total_tokens": 54}}
+
+    deps, calls = make_deps(responder)
+    async with client_for(deps) as c:
+        r = await c.post("/v1/chat/completions", json=body(), headers=HDR)
+
+    assert r.status_code == 200
+    assert len(calls) == 1, f"被截断时重试了 {len(calls)} 次（应该 1 次）"
+    assert r.json()["usage"]["prompt_tokens"] == 34, "usage 不能丢"
+    # reasoning 要透出来
+    assert r.json()["choices"][0]["message"].get("reasoning_content") == "想了很久"
+
+
+@pytest.mark.asyncio
+async def test_真空回答仍然算拒绝要重试():
+    """和上一条区分：finish_reason=stop 但 content 空 —— 这是真的被拒，
+    必须重试。不能因为修了截断问题就把真拒绝也放过。"""
+    def responder(i, unified):
+        if i == 0:
+            return {"content": "", "finish_reason": "stop", "usage": {}}
+        return {"content": "第二次拿到答案", "finish_reason": "stop", "usage": {}}
+
+    deps, calls = make_deps(responder)
+    async with client_for(deps) as c:
+        r = await c.post("/v1/chat/completions", json=body(), headers=HDR)
+
+    assert r.status_code == 200
+    assert len(calls) >= 2, "真空回答该重试"
+    assert r.json()["choices"][0]["message"]["content"] == "第二次拿到答案"
+
+
+# ═══════════════════════════════════════════════════════════════
 # ⑤a AUTO 模式必须型号亲和（真跑抓到的 bug）
 # ═══════════════════════════════════════════════════════════════
 @pytest.mark.asyncio

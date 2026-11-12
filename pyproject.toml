@@ -36,7 +36,9 @@ where = ["src"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
-addopts = "-q --no-header -p no:cacheprovider"
+# 默认排除 e2e（要真上游、要花钱）。显式跑：pytest tests/e2e -m e2e
+# （命令行再给 -m 会覆盖这里的，所以不用改 addopts 就能跑 e2e）
+addopts = "-q --no-header -p no:cacheprovider -m 'not e2e'"
 markers = [
     "e2e: 需要真实上游 API key，手动跑，默认不选",
 ]

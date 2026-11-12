@@ -37,10 +37,17 @@ class OpenAIAdaptor(Adaptor):
         usage = raw.get("usage") or {}
         return {
             "content": msg.get("content") or "",
+            # 思考模型（deepseek-flash / o1 / qwq 等）的思考过程在 reasoning_content。
+            # 不取它会出两个问题：① 用户看不到模型想了什么
+            # ② max_tokens 小的时候 content 为空，被上层误判成「拒绝」
+            "reasoning": msg.get("reasoning_content") or msg.get("reasoning") or "",
             "finish_reason": c0.get("finish_reason"),
             "usage": {
                 "prompt_tokens": usage.get("prompt_tokens", 0),
                 "completion_tokens": usage.get("completion_tokens", 0),
                 "total_tokens": usage.get("total_tokens", 0),
+                # 思考 token 单列，方便排查「为什么 max_tokens 不够」
+                "reasoning_tokens": (usage.get("completion_tokens_details") or {})
+                                    .get("reasoning_tokens", 0),
             },
         }
