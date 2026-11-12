@@ -325,6 +325,57 @@ async def test_中文模型名和中文报错不能把请求打成_500():
 
 
 # ═══════════════════════════════════════════════════════════════
+# ⑤c J5 技术有效性记忆接线（不能是死代码）
+# ═══════════════════════════════════════════════════════════════
+@pytest.mark.asyncio
+async def test_记忆接入后每次尝试都写进_attempt_log(tmp_path):
+    """J5 存在的意义是「学习」，而学习的前提是有人记战绩。
+    这条守的就是接线 —— 没有它 TechniqueMemory 永远是死代码。"""
+    from gateway.jailbreak.memory import TechniqueMemory
+    from gateway.storage.repo import AttemptLogRepo, init_db
+
+    db = str(tmp_path / "m.db")
+    init_db(db)
+    repo = AttemptLogRepo(db)
+
+    def responder(i, unified):
+        if i < 2:
+            return {"content": "I'm sorry, but I can't help with that.",
+                    "finish_reason": "stop", "usage": {}}
+        return {"content": "成了", "finish_reason": "stop", "usage": {}}
+
+    deps, _ = make_deps(responder)
+    deps.memory = TechniqueMemory(repo)
+
+    async with client_for(deps) as c:
+        r = await c.post("/v1/chat/completions", json=body(), headers=HDR)
+
+    assert r.status_code == 200
+    assert repo.count() >= 2, f"只记了 {repo.count()} 条，接线断了"
+
+
+@pytest.mark.asyncio
+async def test_学到的技术会被优先使用(tmp_path):
+    """给某个技术灌够 5 条成功样本后，它应该在阶梯里排到最前面。"""
+    from gateway.jailbreak.memory import TechniqueMemory
+    from gateway.storage.repo import AttemptLogRepo, init_db
+
+    db = str(tmp_path / "m2.db")
+    init_db(db)
+    repo = AttemptLogRepo(db)
+    mem = TechniqueMemory(repo)
+
+    # 让 reverse 攒够 5 条成功（先验里它排 base64 之后）
+    for i in range(5):
+        mem.record_attempt(request_id=f"pre{i}", model="gpt-4o", level=1,
+                           technique="reverse", ok=True)
+
+    ranked = mem.rank(model="gpt-4o", level=1)
+    assert ranked[0].name == "reverse", \
+        f"学到的技术该排第一，实际: {[t.name for t in ranked[:3]]}"
+
+
+# ═══════════════════════════════════════════════════════════════
 # ⑥ token 计量接线
 # ═══════════════════════════════════════════════════════════════
 @pytest.mark.asyncio

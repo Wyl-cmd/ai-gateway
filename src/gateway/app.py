@@ -65,6 +65,8 @@ class GatewayDeps:
     #: (adaptor, unified) -> Iterator[dict]。None 时走 adaptor.stream()
     stream_fn: Callable[[Adaptor, dict], Iterator[dict]] | None = None
     jailbreak_enabled: bool = True
+    #: 技术有效性记忆。None 时退回纯先验顺序（select_techniques 的默认行为）
+    memory: Any = None
     mode: str = "auto"
     target: str | None = None
     policy: str = FallbackPolicy.STRICT.value
@@ -125,33 +127,50 @@ def _to_openai_shape(content: str, finish_reason: str | None, model: str) -> dic
 # ═══════════════════════════════════════════════════════════════
 # 破甲阶梯：给第 n 次尝试生成变形后的 query
 # ═══════════════════════════════════════════════════════════════
-def _jailbreak_text(original: str, attempt: int) -> tuple[str, int]:
-    """第 attempt 次尝试该用什么变形。返回 (变形后文本, 破甲等级)。
+def _jailbreak_text(original: str, attempt: int,
+                    model: str = "", memory: Any = None) -> tuple[str, int]:
+    """第 attempt 次尝试该用什么变形。返回 (变形后文本, 破甲等级, 技术名)。
 
     阶梯顺序（L0 原样 → L1 规则 → L2 模板 → …）：
       第 0 次永远原样发。**先试原样** —— 很多模型根本不拒，
       一上来就变形等于白白改变问题、可能降低答案质量。
       之后 L1 逐个技术试，L1 用完了再上 L2 模板。
+
+    **排序来源**：给了 `memory` 就用它的「先验 + 学习」排序，
+    否则退回 `select_techniques` 的内置先验。这条接线是 J5 存在的意义 ——
+    没有它，技术有效性记忆永远学不到东西（因为排序从来没问过它）。
     """
     if attempt == 0:
-        return original, 0
+        return original, 0, "identity"
 
     # L1：规则型技术
-    techs = select_techniques(original, level=Level.L1)
+    if memory is not None and model:
+        try:
+            techs = memory.rank(model=model, level=int(Level.L1))
+            # 语言适配再过滤一次 —— memory 只管有效性，不管「中文能不能用」
+            usable = [t for t in techs if t.supports(original)]
+            techs = usable or techs
+        except Exception:                       # noqa: BLE001
+            techs = select_techniques(original, level=Level.L1)
+    else:
+        techs = select_techniques(original, level=Level.L1)
+
     if attempt - 1 < len(techs):
         t = techs[attempt - 1]
         try:
-            return t.transform(original), 1
-        except Exception:
-            return original, 1
+            return t.transform(original), 1, t.name
+        except Exception:                       # noqa: BLE001
+            return original, 1, t.name
 
     # L2：模板
     idx = attempt - 1 - len(techs)
     if idx < len(TEMPLATES):
-        return render_template(TEMPLATES[idx], original), 2
+        tp = TEMPLATES[idx]
+        return render_template(tp, original), 2, f"template:{tp.name}"
 
     # 阶梯用尽 → 返回最后一次变形（避免死循环）
-    return render_template(TEMPLATES[-1], original), 2
+    tp = TEMPLATES[-1]
+    return render_template(tp, original), 2, f"template:{tp.name}"
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -243,8 +262,10 @@ def create_app(deps: GatewayDeps) -> FastAPI:
             max_attempts = MAX_JAILBREAK_ATTEMPTS if jb_enabled else 1
 
             for attempt in range(max_attempts):
-                text, level = (_jailbreak_text(original, attempt)
-                               if jb_enabled else (original, 0))
+                text, level, tech_name = (
+                    _jailbreak_text(original, attempt, model=cand.model,
+                                    memory=deps.memory)
+                    if jb_enabled else (original, 0, "identity"))
                 unified = {
                     "model": cand.model,
                     "messages": _replace_last_user(messages, text),
@@ -293,6 +314,20 @@ def create_app(deps: GatewayDeps) -> FastAPI:
                 t_det = time.perf_counter()
                 verdict = detect(content)
                 trace.stage(TraceStage.DETECT, (time.perf_counter() - t_det) * 1000)
+
+                # 记战绩 —— J5 的输入源。成功和拒绝都要记，
+                # 只记成功会让「哪些技术对这个模型无效」永远学不到。
+                if deps.memory is not None:
+                    try:
+                        deps.memory.record_attempt(
+                            request_id=f"{trace.requested}-{attempt}",
+                            model=cand.model, level=level, technique=tech_name,
+                            ok=not verdict.is_refusal,
+                            latency_ms=int((time.perf_counter() - t_up) * 1000),
+                            refusal_kind=verdict.layer if verdict.is_refusal else None,
+                        )
+                    except Exception:           # noqa: BLE001
+                        pass                     # 记忆写失败不能影响主链路
 
                 if not verdict.is_refusal:
                     return _respond(content, result, cand, trace, level, t_start, deps)
