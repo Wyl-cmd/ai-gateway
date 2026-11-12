@@ -266,6 +266,52 @@ async def test_流式逐块透传():
 
 
 # ═══════════════════════════════════════════════════════════════
+# ④a 不给 max_tokens 时要给足默认值（思考模型必需）
+# ═══════════════════════════════════════════════════════════════
+@pytest.mark.asyncio
+async def test_没给_max_tokens_时用足够大的默认值():
+    """实测：deepseek-flash 一次普通问答 reasoning 要 200~400 tokens，
+    破甲变形后到 1000+。不给 max_tokens 时上游默认可能很小，
+    思考模型会直接截断，表现成「内容为空」。
+
+    这条守的就是「网关必须主动给一个够大的值」。
+    """
+    seen = {}
+
+    def responder(i, unified):
+        seen["max_tokens"] = unified.get("max_tokens")
+        return {"content": "答案", "finish_reason": "stop", "usage": {}}
+
+    deps, _ = make_deps(responder)
+    async with client_for(deps) as c:
+        # 故意不给 max_tokens
+        r = await c.post("/v1/chat/completions",
+                         json={"model": "gpt-4o",
+                               "messages": [{"role": "user", "content": "hi"}]},
+                         headers=HDR)
+    assert r.status_code == 200
+    assert seen["max_tokens"] >= 2000, \
+        f"默认 max_tokens={seen['max_tokens']} 太小，思考模型会被截断"
+
+
+@pytest.mark.asyncio
+async def test_给了_max_tokens_时尊重调用方():
+    seen = {}
+
+    def responder(i, unified):
+        seen["max_tokens"] = unified.get("max_tokens")
+        return {"content": "答案", "finish_reason": "stop", "usage": {}}
+
+    deps, _ = make_deps(responder)
+    async with client_for(deps) as c:
+        await c.post("/v1/chat/completions",
+                     json={"model": "gpt-4o", "max_tokens": 50,
+                           "messages": [{"role": "user", "content": "hi"}]},
+                     headers=HDR)
+    assert seen["max_tokens"] == 50, "调用方明确给了就该用它的"
+
+
+# ═══════════════════════════════════════════════════════════════
 # ④b 被 max_tokens 截断 ≠ 拒绝（真跑抓到的 bug）
 # ═══════════════════════════════════════════════════════════════
 @pytest.mark.asyncio

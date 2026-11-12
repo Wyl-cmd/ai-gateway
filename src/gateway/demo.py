@@ -79,17 +79,42 @@ def build() -> GatewayDeps:
     )
 
 
+def _lan_ips() -> list[str]:
+    """列出本机的局域网 IP，方便直接把地址告诉手机/平板。"""
+    import socket
+    ips = []
+    try:
+        # 连一个外网地址（不发包）问内核用了哪个出口 IP —— 最可靠的取法
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(0.5)
+        s.connect(("223.5.5.5", 53))
+        ips.append(s.getsockname()[0])
+        s.close()
+    except Exception:
+        pass
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ip = info[4][0]
+            if ip not in ips and not ip.startswith("127."):
+                ips.append(ip)
+    except Exception:
+        pass
+    return ips
+
+
 def main() -> int:
     deps = build()
     app = create_app(deps)
     print("=" * 68, file=sys.stderr)
     print("AI 路由网关 demo", file=sys.stderr)
-    print(f"  监听     http://127.0.0.1:8787", file=sys.stderr)
+    print(f"  监听     http://0.0.0.0:8787（局域网全部设备可访问）", file=sys.stderr)
+    for ip in _lan_ips():
+        print(f"  局域网   http://{ip}:8787", file=sys.stderr)
     print(f"  API key  {DEMO_KEY}", file=sys.stderr)
     print(f"  候选     {len(deps.candidates)} 个", file=sys.stderr)
     print(f"  适配器   {len(deps.adaptors)} 个", file=sys.stderr)
     print("=" * 68, file=sys.stderr)
-    uvicorn.run(app, host="127.0.0.1", port=8787, log_level="warning")
+    uvicorn.run(app, host="0.0.0.0", port=8787, log_level="warning")
     return 0
 
 

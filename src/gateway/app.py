@@ -47,6 +47,14 @@ from .routing.pool import Candidate, Pool, RoutingPolicy
 #: 不该被无限重试，用户等 30 秒拿到「还是拒绝」比等 5 分钟好。
 MAX_JAILBREAK_ATTEMPTS = 6
 
+#: 调用方没给 max_tokens 时的默认值。
+#:
+#: **必须给足**：实测 deepseek-flash 这类思考模型，一次普通问答 reasoning 就要
+#: 200~400 tokens，破甲变形（Base64/模板）后会到 1000+。给 900 的结果是
+#: reasoning 吃光预算、content 为空、finish_reason=length —— 看起来像「被拒绝」，
+#: 实际是「没想完就没 token 了」。
+DEFAULT_MAX_TOKENS = 4000
+
 
 # ═══════════════════════════════════════════════════════════════
 # 依赖容器
@@ -273,8 +281,9 @@ def create_app(deps: GatewayDeps) -> FastAPI:
                 }
                 if body.get("temperature") is not None:
                     unified["temperature"] = body["temperature"]
-                if body.get("max_tokens") is not None:
-                    unified["max_tokens"] = body["max_tokens"]
+                # 没给就用默认值 —— 不给 max_tokens 时上游默认可能很小，
+                # 思考模型会直接截断（见 DEFAULT_MAX_TOKENS 的注释）
+                unified["max_tokens"] = body.get("max_tokens") or DEFAULT_MAX_TOKENS
 
                 t_up = time.perf_counter()
                 try:
