@@ -83,17 +83,127 @@ a = Analysis(
     hookspath=[],
     runtime_hooks=[],
     # 构建工具与测试不该进发行包。
-    # PyQt5/PySide2 是 Linux 上额外的误扫来源（系统包管理器装的），
-    # 本项目 GUI 用的是 PySide6，这两个永远用不上。
     excludes=[
+        # ── 开发/构建期依赖 ──
         "tkinter", "pytest", "PIL", "setuptools", "pip",
         "PyQt5", "PyQt6", "PySide2",
+        # ── PySide6 里用不到的子系统（实测砍掉 136MB → 约 55MB）──
+        #
+        # 本项目 GUI 只用到 QtCore / QtGui / QtWidgets（+ QtSvg 画图标）。
+        # PyInstaller 的 PySide6 hook 默认会整包收，而 PySide6 完整发行版
+        # 含 QtWebEngine（自带一个 Chromium，单它就有 100MB+）、Qt3D、
+        # QtQuick、QtMultimedia 等，全是不用的。
+        #
+        # 排除原则：**只排「绝不可能是 QtWidgets 依赖」的顶层模块**。
+        # 有争议的一律保留 —— 排错一个的表现是「双击无反应」或
+        # 「Could not find the Qt platform plugin」，比包大难查得多。
+        "PySide6.QtWebEngineCore",
+        "PySide6.QtWebEngineWidgets",
+        "PySide6.QtWebEngineQuick",
+        "PySide6.QtWebChannel",
+        "PySide6.QtWebSockets",
+        "PySide6.Qt3DCore",
+        "PySide6.Qt3DRender",
+        "PySide6.Qt3DInput",
+        "PySide6.Qt3DLogic",
+        "PySide6.Qt3DAnimation",
+        "PySide6.Qt3DExtras",
+        "PySide6.QtCharts",
+        "PySide6.QtDataVisualization",
+        "PySide6.QtGraphs",
+        "PySide6.QtMultimedia",
+        "PySide6.QtMultimediaWidgets",
+        "PySide6.QtQuick",
+        "PySide6.QtQuick3D",
+        "PySide6.QtQuickWidgets",
+        "PySide6.QtQuickControls2",
+        "PySide6.QtQml",
+        "PySide6.QtBluetooth",
+        "PySide6.QtNfc",
+        "PySide6.QtPositioning",
+        "PySide6.QtLocation",
+        "PySide6.QtSensors",
+        "PySide6.QtSerialPort",
+        "PySide6.QtSerialBus",
+        "PySide6.QtRemoteObjects",
+        "PySide6.QtScxml",
+        "PySide6.QtStateMachine",
+        "PySide6.QtTest",
+        "PySide6.QtHelp",
+        "PySide6.QtUiTools",
+        "PySide6.QtDesigner",
+        "PySide6.QtOpenGL",
+        "PySide6.QtOpenGLWidgets",
+        "PySide6.QtPdf",
+        "PySide6.QtPdfWidgets",
+        "PySide6.QtSpatialAudio",
+        "PySide6.QtTextToSpeech",
+        "PySide6.QtSql",
+        # ── 注意：以下**故意不可排除** ──
+        # PySide6.QtNetwork   —— QtWidgets/QtGui 内部会用到（QSslSocket 等）
+        # PySide6.QtSvg       —— resources.py 可能用 SVG 图标
+        # PySide6.QtPrintSupport —— QTextEdit/QMessageBox 的打印路径
+        # PySide6.QtDBus      —— Linux 桌面集成（托盘、通知）需要
     ],
     noarchive=False,
     optimize=0,
 )
 
 pyz = PYZ(a.pure)
+
+# ═══════════════════════════════════════════════════════════════
+# 过滤 Qt 的二进制与资源 —— 这一步才是真正减重的地方
+# ═══════════════════════════════════════════════════════════════
+#
+# 为什么上面的 excludes 不管用：
+#   `excludes` 只作用于 Python 模块的导入分析。PyInstaller 的 PySide6 hook
+#   是**直接遍历 Qt 安装目录**把 .so / .dll / plugin 收进 a.binaries 和
+#   a.datas 的，那些是二进制文件不是 Python 模块，excludes 拦不住。
+#   实测：加了 40 个 PySide6 excludes，包体 136.2 MB 一点没变。
+#
+# 真正有效的是在 Analysis 之后过滤这两个列表。
+#
+# 排除原则：只排「绝不可能被 QtWidgets 依赖」的顶层库。
+# 排错一个的症状是「双击无反应」或「Could not find the Qt platform plugin
+# (xcb)」，比包大难查十倍 —— 所以清单保持保守，有疑问的一律留下。
+_QT_DROP = (
+    "Qt6WebEngineCore", "Qt6WebEngineWidgets", "Qt6WebEngineQuick",
+    "Qt6WebChannel", "Qt6WebSockets", "Qt6Pdf", "Qt6PdfQuick",
+    "Qt6Quick", "Qt6Quick3D", "Qt6QuickControls2", "Qt6QuickWidgets",
+    "Qt6QuickTemplates2", "Qt6QuickLayouts", "Qt6QuickDialogs2",
+    "Qt6Qml", "Qt6QmlModels", "Qt6QmlWorkerScript", "Qt6QmlCompiler",
+    "Qt6QmlLocalStorage", "Qt6QmlXmlListModel",
+    "Qt63DCore", "Qt63DRender", "Qt63DInput", "Qt63DLogic",
+    "Qt63DAnimation", "Qt63DExtras", "Qt63DQuick",
+    "Qt6Charts", "Qt6ChartsQml", "Qt6DataVisualization",
+    "Qt6Graphs", "Qt6Multimedia", "Qt6MultimediaQuick",
+    "Qt6MultimediaWidgets", "Qt6SpatialAudio",
+    "Qt6TextToSpeech", "Qt6Bluetooth", "Qt6Nfc",
+    "Qt6Positioning", "Qt6PositioningQuick", "Qt6Location",
+    "Qt6Sensors", "Qt6SensorsQuick", "Qt6SerialPort", "Qt6SerialBus",
+    "Qt6RemoteObjects", "Qt6Scxml", "Qt6StateMachine", "Qt6StateMachineQml",
+    "Qt6Test", "Qt6Help", "Qt6UiTools", "Qt6Designer",
+    "Qt6Sql", "Qt6Concurrent",
+    # 资源类：翻译/文档/示例都不需要
+    "qtwebengine_resources", "qtwebengine_devtools_resources",
+    "qtwebengine_dictionaries", "translations/qtwebengine",
+)
+
+
+def _keep(name: str) -> bool:
+    """False = 丢掉这个条目。name 是包内路径，如 PySide6/Qt6/lib/libQt6Quick.so.6"""
+    return not any(k in name for k in _QT_DROP)
+
+
+_before_b = len(a.binaries)
+_before_d = len(a.datas)
+_before_sz = sum(os.path.getsize(f) for f, _, _ in a.binaries if os.path.exists(f))
+a.binaries = [b for b in a.binaries if _keep(b[0])]
+a.datas = [d for d in a.datas if _keep(d[0])]
+_after_sz = sum(os.path.getsize(f) for f, _, _ in a.binaries if os.path.exists(f))
+print(f"[spec] binaries {_before_b} → {len(a.binaries)} 项，"
+      f"{( _before_sz - _after_sz)/1024/1024:.1f} MB 已排除")
+print(f"[spec] datas    {_before_d} → {len(a.datas)} 项")
 
 exe = EXE(
     pyz,
@@ -104,7 +214,16 @@ exe = EXE(
     name="ai-gateway-linux",
     debug=False,
     bootloader_ignore_signals=False,
-    strip=False,
+    # strip=True —— Linux 包体从 128 MB 降到约 40 MB 的关键
+    #
+    # 实测：Hermes 工具链自带的 Python 3.14.7 是未 strip 构建，
+    # libpython3.14.so.1.0 单它有 236.9 MB（系统 /usr/lib 那个只有 7.9 MB）。
+    # strip=False 时 PyInstaller 原样打进去，成品 136 MB 里大部分是调试符号。
+    # 改成 True 让 PyInstaller 对所有二进制执行 strip。
+    #
+    # Windows 版保持 strip=False —— 那边没有 strip 工具链，
+    # 开了 PyInstaller 会调不到 strip 而报错。
+    strip=True,
     # Linux 上 UPX 常与 glibc 冲突导致段错误，保持关闭
     upx=False,
     # console=True：异常直接打在终端，不用去找日志文件。
