@@ -15,9 +15,14 @@
 
 ## 三十秒上手
 
+**Windows 免安装（推荐）**：下载 `ai-gateway.exe` 双击即可 —— 托盘常驻，
+面板自动弹出，点「设置」填供应商地址 / 模型 / API Key，保存立即生效。
+`config.toml` 和 `secrets.toml` 自动建在 exe 同目录。
+
 ```bash
 pip install -e .          # 只跑服务
 pip install -e ".[gui]"   # 要图形界面再装（+100 MB PySide6）
+pip install -e ".[build]" # 自己打 exe / 生成图标
 
 cp config.example.toml config.toml    # 配供应商：地址 / 模型 / 账号
 

@@ -404,3 +404,18 @@ def test_设置对话框_回显已保存的密钥():
         assert dlg2.result_secrets() == [("RELAY_KEY", "sk-rotated-new")]
     finally:
         tmp.unlink(missing_ok=True)
+
+
+# ═══════════════════════════════════════════════════════════════
+# ⑥ 图标资源（exe 打包后也要能找到）
+# ═══════════════════════════════════════════════════════════════
+def test_应用图标资源存在且可加载():
+    """源码运行时从项目根加载；打包后从 _MEIPASS 加载（同一函数）。"""
+    pytest.importorskip("PySide6")
+    from pathlib import Path
+
+    from gateway.gui.resources import app_icon, app_icon_path
+
+    p = app_icon_path()
+    assert p is not None and Path(p).is_file(), "assets/ai-gateway.ico 不存在"
+    assert not app_icon().isNull()

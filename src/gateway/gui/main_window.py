@@ -102,7 +102,15 @@ MONO = QFont("Consolas, Menlo, DejaVu Sans Mono, monospace", 11)
 
 
 def _make_icon(state: str = "ok") -> QIcon:
-    """程序图标（不依赖外部文件 —— 打包时省一个资源）。"""
+    """任务栏/托盘图标：优先用 assets/ai-gateway.ico，缺失时回落程序化圆点。
+
+    托盘还承担状态指示（正常/告警/错误）—— 用资源图标时状态靠 tooltip
+    文字表达；只有回落圆点时才用颜色区分。
+    """
+    from .resources import app_icon
+    ico = app_icon()
+    if not ico.isNull():
+        return ico
     color = {"ok": QColor("#4ec9b0"), "warn": QColor("#dcb67a"),
              "err": QColor("#f48771")}.get(state, QColor("#4ec9b0"))
     pix = QPixmap(32, 32)

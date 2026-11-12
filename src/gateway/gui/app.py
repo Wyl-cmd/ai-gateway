@@ -41,10 +41,12 @@ import sys
 
 def run_gui(*, host: str | None = None, port: int | None = None,
             config_path: str = "config.toml",
-            state=None) -> int:
+            state=None, show: bool = False) -> int:
     """启动 GUI（含进程内网关服务）。返回退出码。
 
     host/port 为 None 时用 config.toml 里的 [server] 值。
+    `show=True` 在托盘模式下启动即弹面板（打包 exe 双击的默认行为）——
+    双击一个程序却什么都没出现，用户会以为它没启动。
     """
     try:
         import qasync
@@ -74,6 +76,10 @@ def run_gui(*, host: str | None = None, port: int | None = None,
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName("AI 路由网关")
     app.setQuitOnLastWindowClosed(False)      # 关窗不退出（托盘模式下要常驻）
+    from .resources import app_icon
+    ico = app_icon()
+    if not ico.isNull():
+        app.setWindowIcon(ico)                # 任务栏/Alt-Tab 用打包进来的图标
 
     st = state or GatewayState()
     st.mode = deps.mode                       # 显示层跟配置对齐
@@ -161,7 +167,10 @@ def run_gui(*, host: str | None = None, port: int | None = None,
                          on_config_saved=_on_config_saved)
         tray = GatewayTray(st, win, port=port)
         tray.show()
-        win.hide()                            # 托盘模式启动时不弹窗
+        if show:
+            win.show()                        # 双击 exe：面板直接弹出来
+        else:
+            win.hide()                        # 托盘模式静默后台启动
         tray.showMessage(
             "AI 路由网关",
             f"已在后台运行，监听 {host}:{port}\n点击托盘图标打开面板",
@@ -192,8 +201,11 @@ def main() -> int:
                    help="监听地址（默认取配置 [server].host）")
     p.add_argument("--port", type=int, default=None,
                    help="监听端口（默认取配置 [server].port）")
+    p.add_argument("--show", action="store_true",
+                   help="启动即显示面板（默认托盘静默启动）")
     a = p.parse_args()
-    return run_gui(host=a.host, port=a.port, config_path=a.config)
+    return run_gui(host=a.host, port=a.port, config_path=a.config,
+                   show=a.show)
 
 
 if __name__ == "__main__":

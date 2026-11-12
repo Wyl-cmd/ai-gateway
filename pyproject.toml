@@ -25,6 +25,12 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
 ]
+# 打包 Windows 免安装 exe / 生成图标用（不是运行时依赖）
+build = [
+    "build>=1.2",
+    "pyinstaller>=6.10",
+    "pillow>=10.0",
+]
 
 [project.scripts]
 gateway = "gateway.cli:main"
@@ -37,6 +43,9 @@ where = ["src"]
 # 而且症状很隐蔽：只表现为「破甲效果突然变差」，不报错。
 [tool.setuptools.package-data]
 "gateway.jailbreak" = ["data/pliny/*.mkd"]
+# schema.sql 必须打进包 —— storage/repo.py 靠它建表。漏了的症状：
+# 「记忆/产物库静默失效」，启动正常、破甲排序退化，不报错。
+"gateway.storage" = ["schema.sql"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

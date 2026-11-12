@@ -1,6 +1,20 @@
 # Windows 安装与运行
 
 > 这个网关是纯 Python 项目，Windows 上不需要编译任何东西。
+> 提供两种用法：**免安装 exe**（推荐）和 **Python 源码安装**。
+
+## 〇、免安装 exe（推荐）
+
+下载 `ai-gateway-0.1.0-win64.zip`，解压到任意目录，双击 `ai-gateway.exe`：
+
+- 出现**系统托盘**图标（右下角，可能要点开小箭头），面板自动弹出
+- 首次使用直接点「设置」：新增供应商 → 填名称 / API 地址 / 模型 → 粘贴 API Key → 保存
+- `config.toml` 和 `secrets.toml` 会自动建在 exe 同目录
+- 双击时如果启动失败，同目录会生成 `ai-gateway-error.log` 和弹窗说明原因
+- 排查问题：`ai-gateway.exe --diag` 会在同目录生成 `ai-gateway-diag.log`
+  （模板数量、schema、运行形态）
+
+下面是 Python 源码安装方式（开发/自定义用）。
 
 ## 一、装 Python
 
