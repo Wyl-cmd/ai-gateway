@@ -266,6 +266,65 @@ async def test_流式逐块透传():
 
 
 # ═══════════════════════════════════════════════════════════════
+# ⑤a AUTO 模式必须型号亲和（真跑抓到的 bug）
+# ═══════════════════════════════════════════════════════════════
+@pytest.mark.asyncio
+async def test_auto_模式不会跨型号返回():
+    """请求 gpt-4o 就不能给 deepseek-chat —— 除非显式开了 any_model。"""
+    def responder(i, unified):
+        return {"content": "答案", "finish_reason": "stop", "usage": {}}
+
+    pool = Pool()
+    cands = [Candidate(provider="deepseek", account="k1", model="deepseek-chat"),
+             Candidate(provider="openai", account="k1", model="gpt-4o"),
+             Candidate(provider="openai", account="k2", model="gpt-4o")]
+    deps = GatewayDeps(
+        pool=pool, candidates=cands,
+        adaptors={("openai", "gpt-4o"): OpenAIAdaptor("http://up", "sk"),
+                  ("deepseek", "deepseek-chat"): OpenAIAdaptor("http://up", "sk")},
+        call_fn=lambda a, u: responder(0, u), meter=TokenMeter(),
+        api_key="test-key",          # 必须和 HDR 里的 Bearer 一致
+        mode="auto", policy="strict",
+    )
+    async with client_for(deps) as c:
+        r = await c.post("/v1/chat/completions",
+                         json=body(model="gpt-4o"), headers=HDR)
+
+    assert r.status_code == 200
+    tr = r.headers["X-Gateway-Trace"]
+    assert "actual=gpt-4o" in tr, f"跨型号了: {tr}"
+    assert "X-Gateway-Route-Warning" not in r.headers, "同型号不该有降级告警"
+
+
+# ═══════════════════════════════════════════════════════════════
+# ⑤b 中文内容不能炸响应头（真跑抓到的 bug）
+# ═══════════════════════════════════════════════════════════════
+@pytest.mark.asyncio
+async def test_中文模型名和中文报错不能把请求打成_500():
+    """开了 trace_json_header 后，trace 里的中文（模型名/候选原因/报错）
+    会全进响应头。HTTP 头只能 latin-1，处理不当就 UnicodeEncodeError → 500。
+    这条守的就是真跑时踩到的那个坑。"""
+    def responder(i, unified):
+        if i == 0:
+            return {"content": "I'm sorry, but I can't help with that.",
+                    "finish_reason": "stop", "usage": {}}
+        return {"content": "中文答案", "finish_reason": "stop", "usage": {}}
+
+    deps, _ = make_deps(responder)
+    deps.trace_json_header = True
+    # model 必须和候选对上（gpt-4o），中文只出现在**内容**里 ——
+    # 否则会被型号亲和筛掉变成 503，测的就不是头编码问题了
+    async with client_for(deps) as c:
+        r = await c.post("/v1/chat/completions",
+                         json=body(model="gpt-4o", content="中文问题，请详细回答"),
+                         headers=HDR)
+    assert r.status_code == 200, f"被打成 {r.status_code}: {r.text[:200]}"
+    assert r.headers["X-Gateway-Trace-Json"].isascii()
+    # 中文内容本身要能正常返回
+    assert "中文" in r.json()["choices"][0]["message"]["content"]
+
+
+# ═══════════════════════════════════════════════════════════════
 # ⑥ token 计量接线
 # ═══════════════════════════════════════════════════════════════
 @pytest.mark.asyncio

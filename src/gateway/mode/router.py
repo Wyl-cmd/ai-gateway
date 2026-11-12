@@ -38,12 +38,47 @@ class ModeRouter:
         target: str | None = None,
         policy: FallbackPolicy | str = FallbackPolicy.STRICT,
         known_providers: set[str] | None = None,
+        prefer_model: str | None = None,
     ) -> list[Candidate]:
-        """返回排好序的可用候选队列（空列表不存在 —— 走不了就抛 RouteFailed）。"""
+        """返回排好序的可用候选队列（空列表不存在 —— 走不了就抛 RouteFailed）。
+
+        `prefer_model` 是 AUTO 模式的型号亲和约束。**没有它 auto 模式是错的**：
+        实测请求 `gpt-4o` 结果返回了 `deepseek-chat` —— 三个候选同分，
+        按 key 的字典序排到 deepseek 第一。这等于 auto 模式直接跳到三层降级的
+        第三层（跨型号），而那一层本该默认关闭。
+
+        AUTO 的正确语义是**型号亲和**（Master 2026-11-11 定的）：
+          ① 先在同型号里按权重排序（账号轮巡 → 换供应商，都算同型号）
+          ② 同型号全都不可用，才看 policy 决定要不要跨型号
+        """
         cands = list(candidates)
         policy = FallbackPolicy(policy)
 
         if mode == "auto":
+            if prefer_model:
+                same = [c for c in cands if c.model == prefer_model]
+                picked = self.pool.rank_targets(same, self.policy)
+                if picked:
+                    return picked
+                # 同型号全挂 → 只有显式允许才跨型号
+                if policy == FallbackPolicy.STRICT:
+                    raise RouteFailed(
+                        f"auto 模式下 {prefer_model} 无可用候选（strict 不跨型号）",
+                        tried=[str(c) for c in same],
+                    )
+                if policy == FallbackPolicy.SAME_MODEL:
+                    raise RouteFailed(
+                        f"auto 模式下找不到其他 {prefer_model} 的可用实例",
+                        tried=[str(c) for c in same],
+                    )
+                # ANY_MODEL：同型号排完接跨型号
+                cross = self.pool.rank_targets(
+                    [c for c in cands if c.model != prefer_model], self.policy)
+                if not cross:
+                    raise RouteFailed("auto 模式下没有任何可用候选",
+                                      tried=[str(c) for c in cands])
+                return cross
+
             picked = self.pool.rank_targets(cands, self.policy)
             if not picked:
                 raise RouteFailed("auto 模式下没有可用候选（全部冷却或退避）",

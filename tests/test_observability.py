@@ -96,6 +96,36 @@ def test_JSON_里中文不转义():
     assert "账号配额耗尽" in tr.to_json()
 
 
+def test_头里的_JSON_必须纯_ASCII():
+    """实测踩出来的 bug：X-Gateway-Trace-Json 用 ensure_ascii=False 时，
+    中文一出现 starlette 就抛 UnicodeEncodeError，整个请求 500。
+    HTTP 头只能 latin-1，这一点单元测试里如果全用 ASCII 内容就永远发现不了。
+    """
+    tr = RouteTrace(requested="中文模型名", mode="auto")
+    tr.add_candidate("a", kept=False, reason="账号配额耗尽，退避中")
+    tr.add_candidate("b", kept=True, reason="入选")
+    tr.select("b")
+    tr.finish(actual="中文模型名", provider="测试供应商", latency_ms=1)
+
+    # to_json() 保留中文（给人看）
+    assert "中文模型名" in tr.to_json()
+    # to_json_header() 必须纯 ASCII
+    hdr_json = tr.to_json_header()
+    assert hdr_json.isascii(), f"头里还有非 ASCII: {hdr_json[:200]}"
+    # 但要能反解回中文
+    back = RouteTrace.from_json(hdr_json)
+    assert back.requested == "中文模型名"
+
+
+def test_header_value_中文要转义而不是报错():
+    tr = RouteTrace(requested="中文模型", mode="auto")
+    tr.add_candidate("a", kept=True, reason="入选")
+    tr.select("a")
+    tr.finish(actual="中文模型", provider="供应商", latency_ms=1)
+    v = tr.header_value()
+    assert v.isascii(), f"header_value 非 ASCII: {v}"
+
+
 def test_响应头用的精简版不含候选细节():
     """响应头有长度限制，只给结论不给全量候选。"""
     tr = RouteTrace(requested="deepseek-chat", mode="auto")

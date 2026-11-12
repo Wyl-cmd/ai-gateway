@@ -210,6 +210,8 @@ def create_app(deps: GatewayDeps) -> FastAPI:
                 target=deps.target,
                 policy=deps.policy,
                 known_providers=deps.known_providers,
+                # AUTO 模式的型号亲和：不传这个，auto 会跳到跨型号去
+                prefer_model=model_req if deps.mode == "auto" else None,
             )
         except RouteFailed as e:
             trace.stage(TraceStage.ROUTE, (time.perf_counter() - t0) * 1000)
@@ -335,7 +337,9 @@ def create_app(deps: GatewayDeps) -> FastAPI:
         if w:
             headers["X-Gateway-Route-Warning"] = w
         if d.trace_json_header:
-            headers["X-Gateway-Trace-Json"] = trace.to_json()
+            # 必须用 to_json_header（ASCII 安全）—— 直接塞 to_json()
+            # 遇到中文会 UnicodeEncodeError，整个请求 500
+            headers["X-Gateway-Trace-Json"] = trace.to_json_header()
 
         return JSONResponse(content=payload, headers=headers)
 

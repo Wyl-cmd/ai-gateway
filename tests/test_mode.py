@@ -111,6 +111,71 @@ def test_auto_模式不锁任何东西():
     assert len(picked) == 2, "auto 模式下全部候选都该进备选队列"
 
 
+# ═══════════════════════════════════════════════════════════════
+# ②b AUTO 模式的型号亲和（真跑抓到的 bug）
+# ═══════════════════════════════════════════════════════════════
+def test_auto_模式优先同型号_不跳到跨型号():
+    """实测踩到的 bug：请求 gpt-4o，返回了 deepseek-chat。
+
+    三个候选同分，按 key 的字典序排到 deepseek 第一 —— auto 模式直接跳到了
+    三层降级的第三层（跨型号），而那一层本该默认关闭。
+    型号亲和必须靠 prefer_model 显式传进来，rank_targets 自己不知道用户要什么。
+    """
+    pool, cands = _pool_with(
+        ("openai", "k1", "gpt-4o"),
+        ("openai", "k2", "gpt-4o"),
+        ("deepseek", "k1", "deepseek-chat"),   # 字典序排第一，最容易被误选
+    )
+    r = ModeRouter(pool=pool)
+    picked = r.plan(mode="auto", candidates=cands, prefer_model="gpt-4o")
+
+    assert all(c.model == "gpt-4o" for c in picked), \
+        f"auto 模式必须型号亲和，实际: {[c.model for c in picked]}"
+    assert len(picked) == 2, "同型号的两个账号都该在队列里（账号轮巡）"
+
+
+def test_auto_模式同型号全挂时_strict_不跨型号():
+    pool, cands = _pool_with(
+        ("openai", "k1", "gpt-4o"),
+        ("deepseek", "k1", "deepseek-chat"),
+    )
+    r = ModeRouter(pool=pool)
+    for _ in range(3):
+        pool.record_failure(cands[0], Exception("boom"), lease=pool.acquire(cands[0]))
+
+    with pytest.raises(RouteFailed):
+        r.plan(mode="auto", candidates=cands, prefer_model="gpt-4o",
+               policy=FallbackPolicy.STRICT)
+
+
+def test_auto_模式同型号全挂时_any_model_才跨型号():
+    pool, cands = _pool_with(
+        ("openai", "k1", "gpt-4o"),
+        ("deepseek", "k1", "deepseek-chat"),
+    )
+    r = ModeRouter(pool=pool)
+    for _ in range(3):
+        pool.record_failure(cands[0], Exception("boom"), lease=pool.acquire(cands[0]))
+
+    picked = r.plan(mode="auto", candidates=cands, prefer_model="gpt-4o",
+                    policy=FallbackPolicy.ANY_MODEL)
+    assert picked[0].model == "deepseek-chat", "显式允许时才跨型号"
+
+
+def test_auto_模式换供应商不算跨型号():
+    """同型号换家（openai → azure）属于第二层降级，不是第三层。"""
+    pool, cands = _pool_with(
+        ("openai", "k1", "gpt-4o"),
+        ("azure", "k1", "gpt-4o"),
+        ("deepseek", "k1", "deepseek-chat"),
+    )
+    r = ModeRouter(pool=pool)
+    picked = r.plan(mode="auto", candidates=cands, prefer_model="gpt-4o")
+    providers = {c.provider for c in picked}
+    assert providers == {"openai", "azure"}, "换家是同型号内部的事"
+    assert "deepseek" not in providers
+
+
 def test_manual_只写型号_同型号的多家都进队列():
     pool, cands = _pool_with(
         ("openai", "k1", "gpt-4o"),

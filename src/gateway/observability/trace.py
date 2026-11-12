@@ -27,6 +27,17 @@ from enum import StrEnum
 from typing import Any
 
 
+def _ascii_safe(s: str) -> str:
+    """把任意字符串变成 HTTP 头能装下的 ASCII。
+
+    latin-1 能装 0-255，但头和 body 中间还要过一层字节校验，
+    所以统一按 ASCII 处理：非 ASCII 字符转成 \\uXXXX 形式。
+    """
+    if s.isascii():
+        return s
+    return s.encode("ascii", "backslashreplace").decode("ascii")
+
+
 # ═══════════════════════════════════════════════════════════════
 # 阶段
 # ═══════════════════════════════════════════════════════════════
@@ -114,9 +125,13 @@ class RouteTrace:
         return self.actual_model != self.requested
 
     def warning(self) -> str:
-        """要写进 X-Gateway-Route-Warning 头的告警。没有就返回空串。"""
+        """要写进 X-Gateway-Route-Warning 头的告警。没有就返回空串。
+
+        **同样必须 ASCII** —— 型号名可能带中文别名，
+        直接拼进头就是第二个 UnicodeEncodeError 现场。
+        """
         if self.model_changed:
-            return f"model-changed={self.requested}->{self.actual_model}"
+            return _ascii_safe(f"model-changed={self.requested}->{self.actual_model}")
         return ""
 
     def summary(self) -> dict[str, Any]:
@@ -174,7 +189,12 @@ class RouteTrace:
         return cls.from_dict(json.loads(s))
 
     def header_value(self) -> str:
-        """塞进响应头的精简版（长度敏感，只给结论）。"""
+        """塞进响应头的精简版（长度敏感，只给结论）。
+
+        **必须纯 ASCII** —— HTTP 头只能 latin-1 编码。
+        唯一可能带中文的是 model 名（有些上游允许中文别名），
+        所以统一转义而不是指望调用方保证。
+        """
         bits = [f"mode={self.mode}", f"requested={self.requested}"]
         if self.actual_model:
             bits.append(f"actual={self.actual_model}")
@@ -182,4 +202,14 @@ class RouteTrace:
             bits.append(f"provider={self.actual_provider}")
         if self.source:
             bits.append(f"src={self.source}")
-        return ";".join(bits)
+        return _ascii_safe(";".join(bits))
+
+    def to_json_header(self) -> str:
+        """给 HTTP 头用的 trace JSON —— **必须 ensure_ascii=True**。
+
+        这一条是实测踩出来的：第一版直接把 `to_json()`（ensure_ascii=False）
+        塞进头，中文一出现 starlette 就抛
+        `UnicodeEncodeError: 'latin-1' codec can't encode characters`。
+        单元测试全绿，因为测试里的 trace 内容恰好都是 ASCII。
+        """
+        return json.dumps(self.to_dict(), ensure_ascii=True)
