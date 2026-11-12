@@ -140,9 +140,15 @@ def test_save_secrets_文件不存在则创建_含转义(tmp_path):
     from gateway.gui.config_editor import save_secrets
 
     p = tmp_path / "secrets.toml"
-    save_secrets(p, {'K1': 'sk-"x"\y', "K2": "密钥中文"})
+    # ★ 用 raw string：要测的是「密钥里真的有反斜杠」。
+    #   写成 'sk-"x"\y' 的话，\y 是 Python 的非法转义序列 →
+    #   实际值变成 'sk-"x"y'（反斜杠被吃掉），这个边界条件就没被测到，
+    #   同时 pytest 会报 SyntaxWarning。
+    save_secrets(p, {"K1": r'sk-"x"\y', "K2": "密钥中文"})
     back = tomllib.loads(p.read_text(encoding="utf-8"))
-    assert back == {"K1": 'sk-"x"\y', "K2": "密钥中文"}
+    assert back == {"K1": r'sk-"x"\y', "K2": "密钥中文"}
+    # 显式确认反斜杠真的保住了，而不是被转义吃掉
+    assert back["K1"].count("\\") == 1
 
 
 def test_save_secrets_空提交不动文件(tmp_path):
