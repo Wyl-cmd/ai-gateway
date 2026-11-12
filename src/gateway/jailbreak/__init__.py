@@ -7,8 +7,19 @@ from .refusal import (
     RefusalVerdict,
     detect,
 )
+from .technique import (
+    TECHNIQUE_REGISTRY,
+    Cost,
+    Lang,
+    Level,
+    Technique,
+    get_technique,
+    list_techniques,
+    select_techniques,
+)
 
 __all__ = [
-    "L1_PHRASES_EN", "L1_PHRASES_ZH",
-    "RefusalDetector", "RefusalVerdict", "detect",
+    "L1_PHRASES_EN", "L1_PHRASES_ZH", "RefusalDetector", "RefusalVerdict", "detect",
+    "TECHNIQUE_REGISTRY", "Cost", "Lang", "Level", "Technique",
+    "get_technique", "list_techniques", "select_techniques",
 ]
