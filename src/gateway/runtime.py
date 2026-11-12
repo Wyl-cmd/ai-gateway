@@ -95,16 +95,43 @@ def build_policy(config: GatewayConfig) -> RoutingPolicy:
         return RoutingPolicy()
 
 
+def load_secrets(path: str | os.PathLike[str] | None) -> dict[str, str]:
+    """读密钥文件（secrets.toml，flat 的 变量名 = "密钥"）。
+
+    不存在 = 空 dict（首次启动没有它很正常）。文件里只认字符串值。
+    """
+    if path is None:
+        return {}
+    import tomllib
+    from pathlib import Path
+    p = Path(path)
+    if not p.is_file():
+        return {}
+    try:
+        with p.open("rb") as fh:
+            data = tomllib.load(fh)
+    except Exception as exc:                   # noqa: BLE001
+        _warn(f"密钥文件 {p} 读取失败（当它不存在处理）: {exc}")
+        return {}
+    return {k: v for k, v in data.items() if isinstance(v, str)}
+
+
 def assemble(
     config: GatewayConfig,
     env: Mapping[str, str] | None = None,
+    secrets_path: str | os.PathLike[str] | None = "secrets.toml",
 ) -> GatewayDeps:
     """装配主入口。env 参数便于测试注入，默认读 os.environ。
+
+    密钥查找顺序：**环境变量 > secrets.toml**（显式环境变量是用户手动设的，
+    应该赢；secrets.toml 是设置页写的常规存放处）。两个地方都没有 → 跳账号。
 
     不会因为个别账号/供应商配置不全而失败 —— 网关的哲学是「能跑多少跑多少」，
     缺的东西警告出来让用户知道，而不是整个启动失败。
     """
-    e = dict(os.environ if env is None else env)
+    # 环境变量优先于密钥文件（与 load_config「环境变量 > 文件」一致）
+    e = {**load_secrets(secrets_path),
+         **(os.environ if env is None else dict(env))}
 
     pool = build_pool(config)
     candidates: list[Candidate] = []

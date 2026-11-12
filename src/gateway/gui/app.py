@@ -92,25 +92,22 @@ def run_gui(*, host: str | None = None, port: int | None = None,
 
     app.aboutToQuit.connect(_stop_server)
 
-    # ── 设置保存的编排：密钥确认 → 写文件 → 热重载 ──
+    # ── 设置保存的编排：密钥文件 → 配置文件 → 热重载 ──
     def _on_config_saved(new_cfg, secrets) -> None:
         from PySide6.QtWidgets import QMessageBox
 
-        from .config_editor import serialize_config, set_user_env_var
+        from .config_editor import save_secrets, serialize_config
 
-        # ① 密钥写环境变量（要用户确认 —— 这是改系统状态的动作）
-        if secrets:
-            names = ", ".join(k for k, _ in secrets)
-            if QMessageBox.question(
-                    win, "写入密钥",
-                    f"将把 {len(secrets)} 个密钥写入系统环境变量（{names}），\n"
-                    f"密钥不会写进配置文件。继续？") == QMessageBox.Yes:
-                try:
-                    for k, v in secrets:
-                        set_user_env_var(k, v)
-                except Exception as exc:              # noqa: BLE001
-                    QMessageBox.warning(win, "密钥写入失败", str(exc))
-                    return
+        # ① 密钥合并写进 secrets.toml（本机文件，不碰系统环境变量；
+        #    合并语义保证只动本次提交的键）
+        try:
+            if secrets:
+                from pathlib import Path
+                save_secrets(Path(config_path).parent / "secrets.toml",
+                             dict(secrets))
+        except Exception as exc:                      # noqa: BLE001
+            QMessageBox.warning(win, "密钥文件写入失败", str(exc))
+            return
         # ② 配置写回文件（先写临时文件再替换，写一半断电不会毁掉原配置）
         import os
         import tempfile

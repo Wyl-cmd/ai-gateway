@@ -7,8 +7,6 @@ GUI 对话框保存时调用 serialize_config 写回 config.toml。
 
 from __future__ import annotations
 
-import sys
-
 from gateway.config import (
     GatewayConfig,
     ProviderAccount,
@@ -85,43 +83,11 @@ def test_空配置_序列化_读回仍是空(tmp_path):
 
 
 # ═══════════════════════════════════════════════════════════════
-# 密钥写系统环境变量（setx）
-# ═══════════════════════════════════════════════════════════════
-def test_windows_下_密钥写setx并更新当前进程(monkeypatch):
-    from gateway.gui import config_editor
-
-    calls = []
-    monkeypatch.setattr(sys, "platform", "win32")
-    monkeypatch.setattr(config_editor.subprocess, "run",
-                        lambda *a, **k: calls.append(a))
-    monkeypatch.setenv("EDITOR_TEST_KEY", "")
-
-    config_editor.set_user_env_var("EDITOR_TEST_KEY", "sk-secret")
-
-    assert calls and list(calls[0][0][:3]) == ["setx", "EDITOR_TEST_KEY",
-                                               "sk-secret"]
-    import os
-    assert os.environ["EDITOR_TEST_KEY"] == "sk-secret"   # 当前进程立即生效
-
-
-def test_非windows_只更新当前进程(monkeypatch):
-    from gateway.gui import config_editor
-
-    calls = []
-    monkeypatch.setattr(sys, "platform", "linux")
-    monkeypatch.setattr(config_editor.subprocess, "run",
-                        lambda *a, **k: calls.append(a))
-    monkeypatch.setenv("EDITOR_TEST_KEY2", "")
-
-    config_editor.set_user_env_var("EDITOR_TEST_KEY2", "sk-x")
-
-    assert calls == [], "非 Windows 不该调 setx"
-    import os
-    assert os.environ["EDITOR_TEST_KEY2"] == "sk-x"
-
-
-# ═══════════════════════════════════════════════════════════════
-# 环境变量名自动生成（用户不该手动填这个）
+# 密钥存储键自动生成（用户不该手动填这个）
+#
+# 历史注记：密钥曾走过「写系统环境变量（setx）」的路线，后改为本地
+# secrets.toml 文件 —— 平台无关、不用改系统设置、对新旧进程都生效。
+# 相关的 set_user_env_var 函数及其测试已随之删除。
 # ═══════════════════════════════════════════════════════════════
 def test_auto_key_env_按供应商名生成():
     from gateway.gui.config_editor import auto_key_env
@@ -137,3 +103,54 @@ def test_auto_key_env_中文名和特殊字符():
 
     assert auto_key_env("我家中转", 1) == "KEY_1"
     assert auto_key_env("my-relay 2", 3) == "MY_RELAY_2_KEY_3"
+
+
+# ═══════════════════════════════════════════════════════════════
+# 密钥文件写入（secrets.toml，合并语义）
+# ═══════════════════════════════════════════════════════════════
+def test_save_secrets_保留文件里已有的其他密钥(tmp_path):
+    """只提交一家的密钥时，文件里另一家的必须原样保留 ——
+    否则设置页改一家会把别家的 key 弄丢。"""
+    from gateway.gui.config_editor import save_secrets
+
+    p = tmp_path / "secrets.toml"
+    p.write_text('OTHER_KEY = "sk-old"\n', encoding="utf-8")
+
+    save_secrets(p, {"MY_KEY": "sk-new"})
+
+    text = p.read_text(encoding="utf-8")
+    assert "OTHER_KEY" in text and "sk-old" in text
+    assert "MY_KEY" in text and "sk-new" in text
+
+
+def test_save_secrets_覆盖同名密钥(tmp_path):
+    from gateway.gui.config_editor import save_secrets
+
+    p = tmp_path / "secrets.toml"
+    p.write_text('MY_KEY = "sk-old"\n', encoding="utf-8")
+    save_secrets(p, {"MY_KEY": "sk-rotated"})
+    assert 'MY_KEY = "sk-rotated"' in p.read_text(encoding="utf-8")
+    assert "sk-old" not in p.read_text(encoding="utf-8")
+
+
+def test_save_secrets_文件不存在则创建_含转义(tmp_path):
+    """密钥里的引号/反斜杠/Unicode 要安全落盘且能被 tomllib 读回。"""
+    import tomllib
+
+    from gateway.gui.config_editor import save_secrets
+
+    p = tmp_path / "secrets.toml"
+    save_secrets(p, {'K1': 'sk-"x"\y', "K2": "密钥中文"})
+    back = tomllib.loads(p.read_text(encoding="utf-8"))
+    assert back == {"K1": 'sk-"x"\y', "K2": "密钥中文"}
+
+
+def test_save_secrets_空提交不动文件(tmp_path):
+    """没填任何新密钥（全留空）→ 文件保持原样（不改 mtime 内容）。"""
+    from gateway.gui.config_editor import save_secrets
+
+    p = tmp_path / "secrets.toml"
+    original = 'A = "1"\n'
+    p.write_text(original, encoding="utf-8")
+    save_secrets(p, {})
+    assert p.read_text(encoding="utf-8") == original

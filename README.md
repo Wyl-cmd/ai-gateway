@@ -5,7 +5,7 @@
 ## 现在什么状态
 
 ```
-✅ 全部完成。36 源文件 / 6,396 行 ｜ 18 测试文件 / 4,413 行 ｜ 353 passed
+✅ 全部完成。36 源文件 / 6,396 行 ｜ 18 测试文件 / 4,413 行 ｜ 369 passed
 ✅ config.toml → gateway serve / GUI 进程内服务，真实链路已接通
 ✅ 破甲端到端实测成功（外挂问题 → 8,208 字完整 C++ 工程骨架）
 ✅ 局域网可访问 ｜ Windows 托盘 + Linux 窗口
@@ -19,13 +19,17 @@
 pip install -e .          # 只跑服务
 pip install -e ".[gui]"   # 要图形界面再装（+100 MB PySide6）
 
-cp config.example.toml config.toml    # 然后填环境变量名（不是密钥本身）
-export DEEPSEEK_KEY_1=sk-你的key       # Windows: set DEEPSEEK_KEY_1=...
+cp config.example.toml config.toml    # 配供应商：地址 / 模型 / 账号
 
 gateway serve                         # 纯命令行（读 config.toml 真实运行）
 python -m gateway.gui.app             # 图形界面（Windows 是托盘，同进程起服务）
 python -m gateway.demo                # 零配置冒烟演示（内置假上游，不花钱）
 ```
+
+**API Key 放哪**：启动 GUI 后点「设置」，把 Key 粘进去即可 —— 它保存到
+本机 `secrets.toml`（已被 git 忽略），不进 `config.toml`、不碰系统环境变量，
+Windows / Linux 行为一致。也兼容环境变量方式（`export DEEPSEEK_KEY_1=...`，
+环境变量优先于密钥文件）。
 
 GUI 面板显示真实数据：账号池状态、每次请求的路由链、降级告警、统计；
 切 MANUAL 会出「锁定目标 + 降级策略」选择器，立即生效。

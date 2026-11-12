@@ -43,7 +43,7 @@ pip install -e ".[gui]"
 ## 四、写配置
 
 复制 `config.example.toml` 成 `config.toml`。**密钥不写在配置文件里** ——
-配置里填环境变量名，密钥本身设到环境变量（这样配置文件可以随便传）：
+配置文件可以随便传给别人；密钥存同目录的 `secrets.toml`（已被 git 忽略）：
 
 ```toml
 auth_keys = ["自己定一个网关密码"]   # 顶层，必须在所有 [表头] 之前
@@ -60,15 +60,19 @@ models = ["deepseek-chat", "deepseek-reasoner"]   # 这家能用的模型，必�
 
 [[providers.accounts]]
 key_id = "key1"
-key_env = "DEEPSEEK_KEY_1"               # 环境变量名（不是密钥本身）
+key_env = "DEEPSEEK_KEY_1"               # 密钥在 secrets.toml 里的键名
 ```
 
-然后设环境变量（cmd 里 `set` 只对当前窗口生效，要永久生效用系统设置
-或 `setx`）：
+密钥两种给法（**推荐第一种**，Windows/Linux 通用）：
 
-```cmd
-set DEEPSEEK_KEY_1=sk-你的DeepSeek密钥
+**① 密钥文件**（推荐）：GUI 设置页粘贴保存，或手写 `secrets.toml`：
+
+```toml
+DEEPSEEK_KEY_1 = "sk-你的DeepSeek密钥"
 ```
+
+**② 环境变量**（兼容旧部署）：`set DEEPSEEK_KEY_1=sk-...`（cmd，当前窗口
+生效）。环境变量优先于密钥文件。
 
 多个账号就写多个 `[[providers.accounts]]` 块，网关会自动轮巡；
 配额耗尽只跳过那个账号，同一家其他 key 继续用。

@@ -1,4 +1,4 @@
-"""设置页的纯逻辑层 —— GatewayConfig ⇄ TOML 文本 + 密钥写环境变量。
+"""设置页的纯逻辑层 —— GatewayConfig ⇄ TOML 文本 + 密钥文件读写。
 
 ## 为什么手写序列化而不用 toml 库
 
@@ -12,30 +12,32 @@ Python 标准库只有读（tomllib），没有写；引第三方 toml 写库只
 
 ## 密钥的安全边界
 
-密钥值**永远不进 config.toml**（文件可能被分享/进仓库/被同步盘泄露）。
-对话框里填的密钥走 set_user_env_var：
-  当前进程：os.environ 立即生效（保存后热重载直接能用）
-  以后的进程：Windows 用 setx 写用户环境变量（开机自启场景）
+密钥值**永远不进 config.toml**（文件可能被分享/进仓库/被同步盘泄露），
+而是放在同目录的 **secrets.toml**（已被 .gitignore 忽略）。
+
+不用环境变量的理由：写入是平台相关的（Windows setx / Linux export），
+且只对新进程生效；本地文件 Windows/Linux 通吃，网关在哪跑都一样。
+读取端仍兼容环境变量（runtime.assemble：环境变量 > secrets.toml）——
+已经用环境变量部署过的人不受影响。
 """
 
 from __future__ import annotations
 
 import json
 import os
-import subprocess
-import sys
 
 from ..config import GatewayConfig
 
-__all__ = ["serialize_config", "set_user_env_var", "auto_key_env"]
+__all__ = ["serialize_config", "save_secrets", "auto_key_env"]
 
 
 def auto_key_env(provider_name: str, index: int) -> str:
-    """按供应商名自动生成密钥环境变量名：deepseek → DEEPSEEK_KEY_1。
+    """按供应商名自动生成密钥存储键：deepseek → DEEPSEEK_KEY_1。
 
-    用户不该手动填变量名 —— 这是实现细节。规则：非 ASCII 字母数字
-    一律转下划线（中文名会退化成空前缀，但仍是合法变量名），
-    避免 setx 拒收或读取时对不上。
+    这个键是 secrets.toml 里找密钥用的名字（历史字段名叫 key_env ——
+    环境变量时代的遗产，语义现在就是「密钥的存储键」）。
+    用户不该手动填 —— 这是实现细节。规则：非 ASCII 字母数字一律转
+    下划线，中文名会退化成空前缀（KEY_1），保证是合法 TOML 键。
     """
     prefix = "".join(
         ch if ch.isascii() and (ch.isalnum() or ch == "_") else "_"
@@ -112,12 +114,45 @@ def serialize_config(cfg: GatewayConfig) -> str:
     return "\n".join(lines)
 
 
-def set_user_env_var(key: str, value: str) -> None:
-    """密钥 → 用户环境变量。当前进程立即生效；Windows 加 setx 持久化。
+def save_secrets(path, secrets: dict[str, str]) -> None:
+    """把本次提交的密钥**合并**写进 secrets.toml。
 
-    setx 只对新开的进程生效（本进程靠 os.environ 那行），这是 Windows
-    的机制，不是我们的限制。写入失败（比如策略限制）抛异常给调用方提示。
+    合并语义：文件里已有、本次没提交的键原样保留 —— 设置页改一家
+    供应商的 key，不能把别家的弄丢。同名键覆盖（换 key 了）。
+    空提交直接返回（不动文件）。
+
+    密钥文件为什么不用环境变量：env 写入是平台相关的（Windows setx /
+    Linux export），而且只对新进程生效；一个本地文件 Windows/Linux
+    通吃，网关在哪跑都一样。
     """
-    os.environ[key] = value
-    if sys.platform == "win32":
-        subprocess.run(["setx", key, value], check=True, capture_output=True)
+    if not secrets:
+        return
+    from pathlib import Path
+
+    import tomllib
+
+    p = Path(path)
+    existing: dict[str, str] = {}
+    if p.is_file():
+        try:
+            with p.open("rb") as fh:
+                data = tomllib.load(fh)
+            existing = {k: v for k, v in data.items() if isinstance(v, str)}
+        except Exception as exc:                   # noqa: BLE001
+            _warn_local(f"密钥文件 {p} 读不了（{exc}），将整体重写 —— "
+                        f"建议先备份")
+            existing = {}
+
+    merged = {**existing, **secrets}
+    lines = ["# 本机密钥文件 —— 不进 git，不要分享这个文件",
+             ""]
+    lines += [f"{k} = {_s(v)}" for k, v in merged.items()]
+    lines.append("")
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    tmp.write_text("\n".join(lines), encoding="utf-8")
+    os.replace(tmp, p)
+
+
+def _warn_local(msg: str) -> None:
+    import sys
+    print(f"[gateway] {msg}", file=sys.stderr)

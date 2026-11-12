@@ -165,3 +165,43 @@ def test_sqlite_就绪时_接上记忆和产物库(tmp_path):
                     env={"FAKE_X_KEY_1": "sk-1"})
     assert deps.memory is not None
     assert deps.artifacts is not None
+
+
+# ═══════════════════════════════════════════════════════════════
+# 密钥文件（secrets.toml）—— 本地文件优先于环境变量的方案
+# ═══════════════════════════════════════════════════════════════
+def test_密钥从secrets文件取_不靠环境变量(tmp_path):
+    """API Key 存在 secrets.toml（本机文件），assemble 要能取到。"""
+    (tmp_path / "secrets.toml").write_text(
+        'FAKE_X_KEY_1 = "sk-from-file"\n', encoding="utf-8")
+    deps = assemble(_config([_provider()], tmp_path=tmp_path),
+                    env={}, secrets_path=tmp_path / "secrets.toml")
+    assert deps.adaptors[("fake", "key1")].api_key == "sk-from-file"
+
+
+def test_环境变量优先于secrets文件(tmp_path):
+    """显式环境变量赢 —— 和 load_config「环境变量 > 文件」的优先级哲学一致。"""
+    (tmp_path / "secrets.toml").write_text(
+        'FAKE_X_KEY_1 = "sk-from-file"\n', encoding="utf-8")
+    deps = assemble(_config([_provider()], tmp_path=tmp_path),
+                    env={"FAKE_X_KEY_1": "sk-from-env"},
+                    secrets_path=tmp_path / "secrets.toml")
+    assert deps.adaptors[("fake", "key1")].api_key == "sk-from-env"
+
+
+def test_两把key一个在文件一个在环境变量(tmp_path):
+    """混用也行：key1 在文件，key2 在环境变量。"""
+    (tmp_path / "secrets.toml").write_text(
+        'FAKE_X_KEY_1 = "sk-1"\n', encoding="utf-8")
+    deps = assemble(_config([_provider()], tmp_path=tmp_path),
+                    env={"FAKE_X_KEY_2": "sk-2"},
+                    secrets_path=tmp_path / "secrets.toml")
+    assert deps.adaptors[("fake", "key1")].api_key == "sk-1"
+    assert deps.adaptors[("fake", "key2")].api_key == "sk-2"
+
+
+def test_密钥文件不存在_不炸(tmp_path):
+    """首次启动没有 secrets.toml —— 等同于空文件。"""
+    deps = assemble(_config([_provider()], tmp_path=tmp_path),
+                    env={}, secrets_path=tmp_path / "nope.toml")
+    assert deps.candidates == []          # 两把 key 都没有 → 账号全跳过

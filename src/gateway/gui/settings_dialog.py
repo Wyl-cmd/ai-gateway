@@ -120,13 +120,13 @@ class SettingsDialog(QDialog):
         root.addLayout(mid)
 
         lab_acct = QLabel(
-            "每行一把 API Key。账号 ID 和变量名留空会自动生成（一般不用管）；\n"
-            "API Key 粘贴进来才保存 —— 写入系统环境变量，不会写进配置文件")
+            "每行一把 API Key（「加账号」可配多把轮巡）。API Key 保存到本机\n"
+            "secrets.toml —— 不进 config.toml、不进 git、不碰系统环境变量")
         lab_acct.setObjectName("dim")
         root.addWidget(lab_acct)
-        self.acct_table = QTableWidget(0, 3)
+        self.acct_table = QTableWidget(0, 2)
         self.acct_table.setHorizontalHeaderLabels(
-            ["账号 ID（自动）", "密钥变量名（自动）", "API Key（可选）"])
+            ["账号 ID（自动）", "API Key（可选）"])
         self.acct_table.verticalHeader().setVisible(False)
         root.addWidget(self.acct_table, 1)
 
@@ -207,20 +207,22 @@ class SettingsDialog(QDialog):
         ed.base_url = self.url_ed.text()
         ed.models = self.models_ed.text()
         ed.enabled = self.enabled_ck.isChecked()
+        # 表格只暴露 账号ID + API Key 两列；存储键（key_env）在内部维护
         rows = []
         for r in range(self.acct_table.rowCount()):
             def cell(c: int) -> str:
                 it = self.acct_table.item(r, c)
                 return it.text() if it else ""
-            rows.append([cell(0).strip(), cell(1).strip(), cell(2)])
+            old_key_env = ed.accounts[r][1] if r < len(ed.accounts) else ""
+            rows.append([cell(0).strip(), old_key_env, cell(1)])
         ed.accounts = rows
 
     # ── 账号表 ──
     def _fill_accounts(self, ed: ProviderEd) -> None:
         self.acct_table.setRowCount(len(ed.accounts))
-        for i, (kid, kenv, _secret) in enumerate(ed.accounts):
-            # 密钥列回显永远为空 —— 防止打开设置页就看到密钥明文
-            for col, v in enumerate((kid, kenv, "")):
+        for i, (kid, _key_env, _secret) in enumerate(ed.accounts):
+            # API Key 列回显永远为空 —— 打开设置页不暴露已存的密钥明文
+            for col, v in enumerate((kid, "")):
                 self.acct_table.setItem(i, col, QTableWidgetItem(v))
 
     def _selected_ed(self) -> ProviderEd | None:

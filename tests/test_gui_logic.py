@@ -294,7 +294,7 @@ def test_设置对话框_构造切换保存():
     dlg.plist.setCurrentRow(1)
     dlg.name_ed.setText("renamed")
     dlg.models_ed.setText("m1, m2")
-    dlg.acct_table.item(0, 2).setText("sk-new-secret")
+    dlg.acct_table.item(0, 1).setText("sk-new-secret")   # 两列表：0=账号ID 1=API Key
     dlg._store_form()
     dlg._on_save()
 
@@ -356,10 +356,9 @@ def test_设置对话框_变量名与账号ID自动补全():
                        "accounts": [{"key_id": "", "key_env": ""}]}],
     })
     dlg = SettingsDialog(cfg)
-    # 三个单元格全部留空/只填密钥
+    # 两列表格：账号 ID 留空（自动），只填 API Key
     dlg.acct_table.item(0, 0).setText("")
-    dlg.acct_table.item(0, 1).setText("")
-    dlg.acct_table.item(0, 2).setText("sk-xyz")
+    dlg.acct_table.item(0, 1).setText("sk-xyz")
     dlg._on_save()
 
     assert dlg.result() == QDialog.Accepted.value

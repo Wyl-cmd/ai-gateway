@@ -59,7 +59,8 @@ ladder_timeout_ms = 12000
 # ── 供应商 ──────────────────────────────────────────────────
 # kind: openai（含所有 OpenAI 兼容接口）/ anthropic / gemini / custom
 # models: 这家能服务的模型清单 —— 候选池按 账号×模型 展开，必填
-# key_env: 填**环境变量名**，不是密钥本身；环境变量没设的账号会被跳过
+# key_env: 密钥在 secrets.toml 里的键名（GUI 设置页会自动生成，不用手填）。
+#   密钥本身放 secrets.toml（同目录、已被 git 忽略）或环境变量（优先级更高）
 
 [[providers]]
 name = "deepseek"
