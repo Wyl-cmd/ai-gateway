@@ -135,7 +135,10 @@ netstat -ano | findstr :8787
 
 ## 九、跑测试（可选）
 
+**要装 dev 依赖**（`pip install -e .` 只装运行时依赖，不含 pytest）：
+
 ```cmd
+.venv\Scripts\pip install -e ".[dev]"
 .venv\Scripts\python -m pytest tests -q
 ```
 
@@ -146,3 +149,15 @@ netstat -ano | findstr :8787
 ```cmd
 .venv\Scripts\python -m pytest tests/e2e -q -m e2e
 ```
+
+## 十、不装 GUI 也能用
+
+GUI 只是好看，服务本身不需要 PySide6。
+最小安装（省 100 MB）：
+
+```cmd
+pip install -e .
+.venv\Scripts\python -m gateway.demo
+```
+
+托盘图标、模型切换面板这些都要 PySide6；不加 `[gui]` 时用命令行和配置文件调。
