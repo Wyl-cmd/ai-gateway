@@ -191,3 +191,180 @@ def test_降级次数单独统计():
     st.push_route(RouteDisplay(mode="auto", requested="gpt-4o", actual="gpt-4o-mini",
                                provider="openai", source="manual_fallback"))
     assert st.downgrade_count == 1
+
+
+# ═══════════════════════════════════════════════════════════════
+# ④ 接线纯函数（account_rows / route_display_from_trace）
+# ═══════════════════════════════════════════════════════════════
+def test_account_rows_反映池状态():
+    """冷却/退避/使用次数要正确落到 GUI 表格行上。"""
+    from gateway.gui.state import account_rows
+    from gateway.providers.base import ProviderError
+    from gateway.routing.pool import Candidate, Pool
+
+    pool = Pool()
+    c1 = Candidate(provider="p1", account="k1", model="m1")
+    c2 = Candidate(provider="p2", account="k1", model="m1")
+    # p2 整家冷却（3 次健康失败），p1/k1 配额退避
+    for _ in range(3):
+        pool.record_failure(c2, ProviderError("boom", status=500),
+                            lease=pool.acquire(c2))
+    pool.record_failure(c1, ProviderError("insufficient quota", status=402),
+                        lease=pool.acquire(c1))
+    pool.record_success(c2, 50.0, lease=pool.acquire(c2))  # 成功解冷却
+
+    rows = account_rows([c1, c2], pool)
+    r1, r2 = rows
+    assert (r1.provider, r1.account, r1.model) == ("p1", "k1", "m1")
+    assert r1.quota_exhausted and not r1.cooled
+    # uses = 被选中次数（3 次失败尝试 + 1 次成功 = 4），不是成功次数
+    assert r2.uses == 4 and r2.status_text == "● 正常"
+
+
+def test_route_display_from_trace_完整映射():
+    """trace dict（on_request_done 的载荷）→ RouteDisplay 的字段一一对应。"""
+    from gateway.gui.state import route_display_from_trace
+
+    d = {
+        "requested": "gpt-4o", "mode": "manual",
+        "candidates": [
+            {"candidate": "openai:key1/gpt-4o", "kept": True, "reason": "入选"},
+            {"candidate": "openai:key2/gpt-4o", "kept": False, "reason": "账号配额耗尽，退避中"},
+        ],
+        "selected": "openai:key1/gpt-4o",
+        "actual_model": "gpt-4o", "actual_provider": "openai",
+        "source": "manual_strict", "latency_ms": 12.0,
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+    }
+    rd = route_display_from_trace(d)
+    assert rd.mode == "manual"
+    assert rd.requested == "gpt-4o"
+    assert rd.actual == "gpt-4o" and rd.provider == "openai"
+    assert rd.source == "manual_strict"
+    assert len(rd.chain) == 2
+    assert rd.chain[1] == ("openai:key2/gpt-4o", "账号配额耗尽，退避中")
+    assert (rd.prompt_tokens, rd.completion_tokens) == (10, 5)
+    assert not rd.model_changed          # 换 provider 不换型号不算降级
+
+
+def test_route_display_from_trace_空值不炸():
+    """上游故障等场景 trace 可能没有 selected/usage —— 空值要给默认。"""
+    from gateway.gui.state import route_display_from_trace
+
+    rd = route_display_from_trace({"requested": "x", "mode": "auto"})
+    assert rd.actual == "" and rd.provider == ""
+    assert rd.chain == []
+    assert rd.total_tokens == 0
+
+
+# ═══════════════════════════════════════════════════════════════
+# ⑤ 设置对话框（offscreen 冒烟 —— 渲染层只验「能创建、能保存、不炸」）
+# ═══════════════════════════════════════════════════════════════
+def test_设置对话框_构造切换保存():
+    """真实构造对话框 → 切供应商 → 改字段 → 保存 → 校验产物配置。
+
+    没装 PySide6 的环境跳过（gui 是可选依赖）。
+    """
+    pytest.importorskip("PySide6")
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    from PySide6.QtWidgets import QApplication, QDialog
+    app = QApplication.instance() or QApplication([])
+
+    from gateway.config import GatewayConfig
+    from gateway.gui.settings_dialog import SettingsDialog
+
+    cfg = GatewayConfig.model_validate({
+        "auth_keys": ["gw-key"],
+        "providers": [
+            {"name": "deepseek", "kind": "openai",
+             "base_url": "https://api.deepseek.com",
+             "models": ["deepseek-chat"],
+             "accounts": [{"key_id": "key1", "key_env": "DS_KEY_1"}]},
+            {"name": "relay", "kind": "custom", "base_url": "http://127.0.0.1:9",
+             "models": ["m-old"],
+             "accounts": [{"key_id": "k", "key_env": "RELAY_KEY"}]},
+        ],
+    })
+    dlg = SettingsDialog(cfg)
+    assert dlg.plist.count() == 2
+
+    # 切到第二家（信号触发 _load_provider）→ 改名/改模型/填密钥 → 保存
+    dlg.plist.setCurrentRow(1)
+    dlg.name_ed.setText("renamed")
+    dlg.models_ed.setText("m1, m2")
+    dlg.acct_table.item(0, 2).setText("sk-new-secret")
+    dlg._store_form()
+    dlg._on_save()
+
+    assert dlg.result() == QDialog.Accepted.value
+    out = dlg.result_config()
+    assert out.providers[1].name == "renamed"
+    assert out.providers[1].models == ["m1", "m2"]
+    assert out.providers[0].name == "deepseek"        # 没动的那家原样
+    # 密钥不进配置，只出现在 secrets 清单里
+    assert out.providers[1].accounts[0].key_env == "RELAY_KEY"
+    assert dlg.result_secrets() == [("RELAY_KEY", "sk-new-secret")]
+
+
+def test_设置对话框_缺模型被拦截(monkeypatch):
+    """配了账号但没模型的供应商要在对话框就被拦（装配时静默跳过太隐蔽）。"""
+    pytest.importorskip("PySide6")
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
+    app = QApplication.instance() or QApplication([])
+
+    from gateway.config import GatewayConfig
+    from gateway.gui.settings_dialog import SettingsDialog
+
+    cfg = GatewayConfig.model_validate({
+        "providers": [{"name": "p1", "kind": "openai", "base_url": "http://x",
+                       "models": [], "accounts": [{"key_id": "k", "key_env": "K"}]}],
+    })
+    dlg = SettingsDialog(cfg)
+    # 拦截弹窗（offscreen 下没人点确定，必须替它决定）
+    shown = {}
+    monkeypatch.setattr(QMessageBox, "warning",
+                        staticmethod(lambda *a, **k:
+                                     shown.setdefault("text", a[2] if len(a) > 2 else "")))
+    dlg._on_save()
+    assert dlg.result() != QDialog.Accepted.value
+    assert "模型" in shown.get("text", "")
+
+
+def test_设置对话框_变量名与账号ID自动补全():
+    """用户只填 API Key：账号 ID / 密钥变量名留空也能保存，自动生成。
+
+    之前的行为是静默丢弃这类账号 —— 用户填了密钥却没生效，太隐蔽。
+    """
+    pytest.importorskip("PySide6")
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    from PySide6.QtWidgets import QApplication, QDialog
+    app = QApplication.instance() or QApplication([])
+
+    from gateway.config import GatewayConfig
+    from gateway.gui.settings_dialog import SettingsDialog
+
+    cfg = GatewayConfig.model_validate({
+        "providers": [{"name": "My Relay", "kind": "openai", "base_url": "http://x",
+                       "models": ["m1"],
+                       "accounts": [{"key_id": "", "key_env": ""}]}],
+    })
+    dlg = SettingsDialog(cfg)
+    # 三个单元格全部留空/只填密钥
+    dlg.acct_table.item(0, 0).setText("")
+    dlg.acct_table.item(0, 1).setText("")
+    dlg.acct_table.item(0, 2).setText("sk-xyz")
+    dlg._on_save()
+
+    assert dlg.result() == QDialog.Accepted.value
+    acc = dlg.result_config().providers[0].accounts[0]
+    assert acc.key_id == "key1"
+    assert acc.key_env == "MY_RELAY_KEY_1"
+    # 密钥和自动生成的变量名正确配对
+    assert dlg.result_secrets() == [("MY_RELAY_KEY_1", "sk-xyz")]

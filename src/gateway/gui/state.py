@@ -155,3 +155,44 @@ def format_route_line(d: RouteDisplay) -> list[str]:
         mark = "→" if reason == "入选" else "×"
         out.append(f"{mark} {cand}    {reason}")
     return out
+
+
+# ═══════════════════════════════════════════════════════════════
+# 接线用纯函数（无 Qt，可 TDD）
+# ═══════════════════════════════════════════════════════════════
+def account_rows(candidates, pool) -> list[AccountRow]:
+    """候选池 + Pool 实时状态 → GUI 账号表行。
+
+    供 MainWindow 的轮询 QTimer 调用。Pool 的 state() 有 setdefault
+    副作用（会建空记录），但只影响内存里多几条零值记录，无碍。
+    """
+    return [
+        AccountRow(
+            provider=c.provider, account=c.account, model=c.model,
+            cooled=pool.is_cooled(c.provider),
+            quota_exhausted=pool.is_account_backoff(c.provider, c.account),
+            uses=pool.state(c).uses,
+        )
+        for c in candidates
+    ]
+
+
+def route_display_from_trace(d: dict) -> RouteDisplay:
+    """app 层 on_request_done 回调的 trace dict → RouteDisplay。
+
+    dict 的键来自 RouteTrace.to_dict()（observability/trace.py），
+    usage/jailbreak_level 是接入层回调时附加的。纯映射、无副作用 ——
+    GUI 层只管画，不解析。
+    """
+    usage = d.get("usage") or {}
+    return RouteDisplay(
+        mode=d.get("mode") or "auto",
+        requested=d.get("requested") or "",
+        actual=d.get("actual_model") or "",
+        provider=d.get("actual_provider") or "",
+        source=d.get("source") or "",
+        chain=[(c.get("candidate", ""), c.get("reason", ""))
+               for c in d.get("candidates", [])],
+        prompt_tokens=int(usage.get("prompt_tokens", 0) or 0),
+        completion_tokens=int(usage.get("completion_tokens", 0) or 0),
+    )

@@ -42,22 +42,36 @@ pip install -e ".[gui]"
 
 ## 四、写配置
 
-复制 `config.example.toml` 成 `config.toml`，填你的 API key：
+复制 `config.example.toml` 成 `config.toml`。**密钥不写在配置文件里** ——
+配置里填环境变量名，密钥本身设到环境变量（这样配置文件可以随便传）：
 
 ```toml
+auth_keys = ["自己定一个网关密码"]   # 顶层，必须在所有 [表头] 之前
+
 [server]
 host = "0.0.0.0"        # 局域网全设备可访问
 port = 8787
-api_key = "自己定一个网关密码"
 
-[[providers.deepseek]]
-account = "key1"
-api_key = "sk-你的DeepSeek密钥"
+[[providers]]
+name = "deepseek"
+kind = "openai"                          # openai 兼容接口都用这个
 base_url = "https://api.deepseek.com"
-models = ["deepseek-chat", "deepseek-flash", "deepseek-reasoner"]
+models = ["deepseek-chat", "deepseek-reasoner"]   # 这家能用的模型，必填
+
+[[providers.accounts]]
+key_id = "key1"
+key_env = "DEEPSEEK_KEY_1"               # 环境变量名（不是密钥本身）
 ```
 
-多个账号就写多个 `[[providers.deepseek]]` 块，网关会自动轮巡。
+然后设环境变量（cmd 里 `set` 只对当前窗口生效，要永久生效用系统设置
+或 `setx`）：
+
+```cmd
+set DEEPSEEK_KEY_1=sk-你的DeepSeek密钥
+```
+
+多个账号就写多个 `[[providers.accounts]]` 块，网关会自动轮巡；
+配额耗尽只跳过那个账号，同一家其他 key 继续用。
 
 ## 五、启动
 
@@ -67,13 +81,14 @@ models = ["deepseek-chat", "deepseek-flash", "deepseek-reasoner"]
 .venv\Scripts\python -m gateway.gui.app
 ```
 
-Windows 上会出现在**系统托盘**（右下角，可能要点开小箭头），
-鼠标悬停能看到 `AUTO · deepseek-chat · 运行中`。
+Windows 上会出现在**系统托盘**（右下角，可能要点开小箭头）。
+面板里是真实数据：账号池状态、每次请求的路由链、降级告警、统计。
+切 MANUAL 会出「锁定目标 + 降级策略」选择器，切换立即生效。
 
-**纯命令行**：
+**纯命令行（读同一份 config.toml）**：
 
 ```cmd
-.venv\Scripts\python -m gateway.demo
+.venv\Scripts\gateway serve
 ```
 
 会打印监听的地址，包括局域网 IP，手机可以直接连。
@@ -142,7 +157,7 @@ netstat -ano | findstr :8787
 .venv\Scripts\python -m pytest tests -q
 ```
 
-应该看到 `334 passed`。
+应该看到 `353 passed`。
 
 端到端测试要真实调 API（会花钱），默认排除，单独跑：
 

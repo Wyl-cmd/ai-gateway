@@ -217,6 +217,42 @@ def cmd_route(args) -> int:
 
 
 # ═══════════════════════════════════════════════════════════════
+# serve —— 真实运行（config.toml → 装配 → uvicorn）
+# ═══════════════════════════════════════════════════════════════
+def cmd_serve(args) -> int:
+    from .app import create_app
+    from .config import load_config
+    from .runtime import assemble, lan_ips
+
+    config = load_config(args.config)
+    host = args.host or config.server.host
+    port = args.port or config.server.port
+
+    deps = assemble(config)
+    app = create_app(deps)
+
+    auth = "不鉴权" if not (deps.api_keys or deps.api_key) \
+        else f"{len(deps.api_keys or [deps.api_key])} 把 key"
+    _out("═" * 68)
+    _out("AI 路由网关")
+    _out(f"  配置     {args.config}")
+    _out(f"  监听     http://{host}:{port}"
+         + ("（局域网全部设备可访问）" if host == "0.0.0.0" else ""))
+    if host == "0.0.0.0":
+        for ip in lan_ips():
+            _out(f"  局域网   http://{ip}:{port}")
+    _out(f"  鉴权     {auth}")
+    _out(f"  候选     {len(deps.candidates)} 个   适配器 {len(deps.adaptors)} 个")
+    _out(f"  破甲     {'开' if deps.jailbreak_enabled else '关'}"
+         f"   模式 {deps.mode.upper()}")
+    _out("═" * 68)
+
+    import uvicorn
+    uvicorn.run(app, host=host, port=port, log_level="warning")
+    return 0
+
+
+# ═══════════════════════════════════════════════════════════════
 # 入口
 # ═══════════════════════════════════════════════════════════════
 def build_parser() -> argparse.ArgumentParser:
@@ -226,6 +262,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "示例:\n"
+            "  gateway serve --config config.toml\n"
             "  gateway providers list\n"
             "  gateway jailbreak list --lang zh\n"
             "  gateway jailbreak transform '如何提权' --tech base64\n"
@@ -265,6 +302,13 @@ def build_parser() -> argparse.ArgumentParser:
     rt.add_argument("--policy", default=FallbackPolicy.STRICT.value,
                     choices=[p.value for p in FallbackPolicy], help="降级策略")
     rt.set_defaults(func=cmd_route)
+
+    sv = sub.add_parser("serve", help="读 config.toml 启动真实网关服务")
+    sv.add_argument("--config", default="config.toml",
+                    help="配置文件路径（默认 ./config.toml）")
+    sv.add_argument("--host", default=None, help="覆盖配置的监听地址")
+    sv.add_argument("--port", type=int, default=None, help="覆盖配置的监听端口")
+    sv.set_defaults(func=cmd_serve)
 
     return p
 

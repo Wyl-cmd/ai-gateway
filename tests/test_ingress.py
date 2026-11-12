@@ -572,3 +572,90 @@ async def test_空_messages_返回_400():
         r = await c.post("/v1/chat/completions",
                          json={"model": "gpt-4o", "messages": []}, headers=HDR)
     assert r.status_code == 400
+
+
+# ═══════════════════════════════════════════════════════════════
+# ⑧ 多 key 鉴权 / 不鉴权（runtime 装配带来的语义）
+# ═══════════════════════════════════════════════════════════════
+def _deps_with(**extra):
+    """make_deps 的可变版本 —— 按 runtime 装配的键语义构造 deps。"""
+    extra.setdefault("api_key", "test-key")
+    pool = Pool()
+    cands = extra.pop("candidates", [Candidate(provider="fake", account="k1",
+                                               model="gpt-4o")])
+    adaptors = extra.pop("adaptors", {("fake", "k1"): OpenAIAdaptor("http://up", "sk-x")})
+    return GatewayDeps(
+        pool=pool, candidates=cands, adaptors=adaptors,
+        call_fn=lambda a, u: {"content": "ok", "finish_reason": "stop",
+                              "usage": {"prompt_tokens": 1, "completion_tokens": 1,
+                                        "total_tokens": 2}},
+        meter=TokenMeter(), **extra,
+    )
+
+
+@pytest.mark.asyncio
+async def test_多把key_任一把都放行():
+    deps = _deps_with(api_key="", api_keys=["k1", "k2"])
+    async with client_for(deps) as c:
+        for key in ("k1", "k2"):
+            r = await c.post("/v1/chat/completions", json=body(),
+                             headers={"Authorization": f"Bearer {key}"})
+            assert r.status_code == 200, f"key={key} 应放行"
+
+
+@pytest.mark.asyncio
+async def test_没配任何key_不鉴权():
+    """config.auth_keys 留空的既定语义：不鉴权（仅本机场景）。"""
+    deps = _deps_with(api_key="", api_keys=[])
+    async with client_for(deps) as c:
+        r = await c.post("/v1/chat/completions", json=body())   # 无 Authorization 头
+    assert r.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_on_request_done_收到trace与usage():
+    got = []
+    deps = _deps_with(on_request_done=got.append)
+    async with client_for(deps) as c:
+        await c.post("/v1/chat/completions", json=body(), headers=HDR)
+    assert len(got) == 1
+    d = got[0]
+    assert d["requested"] == "gpt-4o"
+    assert d["selected"] == "fake:k1/gpt-4o"
+    assert d["usage"]["total_tokens"] == 2
+    assert d["candidates"], "候选链不能为空"
+
+
+@pytest.mark.asyncio
+async def test_适配器查找_账号键优先于型号键():
+    """同 provider 双账号：选中的候选必须拿到自己账号的适配器（各自的 key）。
+
+    做法：k1 打成配额耗尽退避 → 路由只剩 k2 → call_fn 捕获到的适配器
+    必须是 ("fake","k2") 那个实例（api_key=sk-2）。
+    """
+    seen = {}
+
+    def call_fn(adaptor, unified):
+        seen["key"] = adaptor.api_key
+        return {"content": "ok", "finish_reason": "stop",
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1,
+                          "total_tokens": 2}}
+
+    pool = Pool()
+    k1 = Candidate(provider="fake", account="k1", model="gpt-4o")
+    k2 = Candidate(provider="fake", account="k2", model="gpt-4o")
+    # k1 配额耗尽（402）→ 账号级退避，只剩 k2。
+    # 消息必须命中 _QUOTA_MARKERS（insufficient quota 等）——
+    # 写 "Insufficient Balance" 会被分类成 client 错误、不触发退避
+    pool.record_failure(k1, ProviderError("You have insufficient quota", status=402),
+                        lease=pool.acquire(k1))
+    deps = GatewayDeps(
+        pool=pool, candidates=[k1, k2],
+        adaptors={("fake", "k1"): OpenAIAdaptor("http://up", "sk-1"),
+                  ("fake", "k2"): OpenAIAdaptor("http://up", "sk-2")},
+        call_fn=call_fn, meter=TokenMeter(), api_key="test-key",
+    )
+    async with client_for(deps) as c:
+        r = await c.post("/v1/chat/completions", json=body(), headers=HDR)
+    assert r.status_code == 200
+    assert seen["key"] == "sk-2", "选了 k2 却用了别的账号的 key —— 轮巡就废了"

@@ -140,6 +140,9 @@ class ProviderConfig(BaseModel):
     kind: Literal["openai", "anthropic", "gemini", "custom"] = "openai"
     base_url: str
     enabled: bool = True
+    # 这家能服务的模型清单 —— 候选池按 provider × account × model 展开，
+    # MANUAL 目标选择也用它。为空 = 该 provider 不可选（装配时跳过并警告）
+    models: list[str] = Field(default_factory=list)
     accounts: list[ProviderAccount] = Field(default_factory=list)
     pricing: list[ProviderPricing] = Field(default_factory=list)
 

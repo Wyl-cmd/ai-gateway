@@ -68,6 +68,9 @@ class GatewayDeps:
     adaptors: dict[tuple[str, str], Adaptor]
     meter: TokenMeter
     api_key: str
+    #: 多把网关密钥（runtime 装配从 auth_keys 来）。None/空 = 只认 api_key；
+    #: 两者都空 = 不鉴权（与 config「留空 = 仅本机安全」语义一致）
+    api_keys: list[str] | None = None
     #: (adaptor, unified) -> dict。None 时走 adaptor.chat()
     call_fn: Callable[[Adaptor, dict], dict] | None = None
     #: (adaptor, unified) -> Iterator[dict]。None 时走 adaptor.stream()
@@ -81,7 +84,11 @@ class GatewayDeps:
     target: str | None = None
     policy: str = FallbackPolicy.STRICT.value
     known_providers: set[str] | None = None
+    #: 装配好的评分策略。None 时用默认 RoutingPolicy()
+    routing_policy: RoutingPolicy | None = None
     trace_json_header: bool = False
+    #: 每个请求收尾时回调（GUI 用它填路由链/统计）。失败不影响主链路
+    on_request_done: Callable[[dict], None] | None = None
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -109,7 +116,18 @@ def _replace_last_user(messages: list[dict], new_text: str) -> list[dict]:
 
 
 def _pick_adaptor(deps: GatewayDeps, c: Candidate) -> Adaptor:
-    """按 (provider, model) 找适配器；找不到就按 provider 兜底。"""
+    """按候选找适配器。查找顺序（两级都是 (provider, x) 二元组）：
+
+        ① (provider, account) —— runtime 装配的键：一账号一实例一 key
+        ② (provider, model)   —— demo / 旧测试的键
+        ③ provider 兜底        —— 同家任意实例（key 不区分账号的场景）
+
+    ①先于②是**正确性**问题：同 provider 多账号时，(provider, model)
+    命中的是「先注册的那个账号」的 key，账号轮巡就会全打到一把 key 上。
+    """
+    a = deps.adaptors.get((c.provider, c.account))
+    if a is not None:
+        return a
     a = deps.adaptors.get((c.provider, c.model))
     if a is not None:
         return a
@@ -215,10 +233,14 @@ def create_app(deps: GatewayDeps) -> FastAPI:
     app = FastAPI(title="AI 路由网关", version="0.1.0", docs_url=None, redoc_url=None)
 
     def _authorized(request: Request) -> bool:
+        # 没配任何 key = 不鉴权（config.py 的既定语义：仅本机使用场景）
+        keys = deps.api_keys or ([deps.api_key] if deps.api_key else [])
+        if not keys:
+            return True
         auth = request.headers.get("authorization", "")
         if not auth.startswith("Bearer "):
             return False
-        return auth[7:].strip() == deps.api_key
+        return auth[7:].strip() in keys
 
     # ── 健康检查（不鉴权）──
     @app.get("/health")
@@ -271,7 +293,7 @@ def create_app(deps: GatewayDeps) -> FastAPI:
             trace.stage(TraceStage.ROUTE, (time.perf_counter() - t0) * 1000)
             return _err(503, "no_candidate", f"没有可用候选: {e}")
         trace.stage(TraceStage.ROUTE, (time.perf_counter() - t0) * 1000)
-        policy_obj = RoutingPolicy()
+        policy_obj = deps.routing_policy or RoutingPolicy()
         for c in queue:
             trace.add_candidate(str(c), kept=True, reason="入选",
                                 score=deps.pool.score(c, policy_obj))
@@ -453,6 +475,14 @@ def create_app(deps: GatewayDeps) -> FastAPI:
             # 遇到中文会 UnicodeEncodeError，整个请求 500
             headers["X-Gateway-Trace-Json"] = trace.to_json_header()
 
+        # 请求收尾回调（GUI 的路由链/统计数据源）。回调炸了不能带崩响应
+        if d.on_request_done is not None:
+            try:
+                d.on_request_done({**trace.to_dict(), "usage": payload["usage"],
+                                   "jailbreak_level": level})
+            except Exception:                   # noqa: BLE001
+                pass
+
         return JSONResponse(content=payload, headers=headers)
 
     # ── 流式 ──
@@ -490,6 +520,13 @@ def create_app(deps: GatewayDeps) -> FastAPI:
                         }
                         yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
                 yield "data: [DONE]\n\n"
+                # 流式收尾也回调（GUI 统计不该漏掉流式请求）
+                if d.on_request_done is not None:
+                    try:
+                        d.on_request_done({**trace.to_dict(), "usage": {},
+                                           "jailbreak_level": 0})
+                    except Exception:               # noqa: BLE001
+                        pass
             except Exception as e:                   # noqa: BLE001
                 err = {"error": {"type": "stream_error", "message": str(e)}}
                 yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n"

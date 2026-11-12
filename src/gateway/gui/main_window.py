@@ -26,9 +26,12 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QFont, QIcon, QPainter, QPixmap, QColor
 from PySide6.QtWidgets import (
+    QComboBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -42,7 +45,18 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .state import GatewayState, format_route_line, format_short_status
+from .state import (
+    GatewayState,
+    account_rows,
+    format_route_line,
+    format_short_status,
+    route_display_from_trace,
+)
+
+if TYPE_CHECKING:
+    # 只在类型检查时导入 —— GUI 层不该在 import 期就拉起 FastAPI 全家
+    from ..app import GatewayDeps
+    from ..config import GatewayConfig
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -120,12 +134,21 @@ def _card(title: str) -> tuple[QWidget, QVBoxLayout]:
 # ═══════════════════════════════════════════════════════════════
 class MainWindow(QMainWindow):
     def __init__(self, state: GatewayState, *, host: str = "0.0.0.0",
-                 port: int = 8787, on_quit=None) -> None:
+                 port: int = 8787, on_quit=None,
+                 deps: "GatewayDeps | None" = None,
+                 config: "GatewayConfig | None" = None,
+                 config_path: str = "",
+                 on_config_saved=None) -> None:
         super().__init__()
         self.state = state
         self.host = host
         self.port = port
         self._on_quit = on_quit
+        # deps = None 时是纯展示壳（无后端）；GUI 所有真实数据都从 deps 来
+        self.deps = deps
+        self._config = config
+        self.config_path = config_path
+        self._on_config_saved = on_config_saved
 
         self.setWindowTitle("AI 路由网关")
         self.setWindowIcon(_make_icon())
@@ -156,6 +179,36 @@ class MainWindow(QMainWindow):
         self.warn_lab.setObjectName("warn")
         self.warn_lab.setVisible(False)
         slay.addWidget(self.warn_lab)
+
+        # ── MANUAL 控件行：仅手动模式且有后端时可见 ──
+        # AUTO/MANUAL 的区别在这里变成看得见的东西：MANUAL 必须回答
+        # 「锁到谁、不可用怎么办」两个问题，AUTO 则什么都不用选。
+        self.manual_row = QWidget()
+        mlay = QHBoxLayout(self.manual_row)
+        mlay.setContentsMargins(0, 0, 0, 0)
+        mlay.addWidget(QLabel("锁定目标"))
+        self.target_combo = QComboBox()
+        self.target_combo.setFont(MONO)
+        self.target_combo.setMinimumWidth(240)
+        self.target_combo.currentTextChanged.connect(self._on_target_changed)
+        mlay.addWidget(self.target_combo, 1)
+        mlay.addWidget(QLabel("降级策略"))
+        self.policy_combo = QComboBox()
+        for label, value in (
+            ("严格（不可用就报错）", "strict"),
+            ("换供应商上同型号", "fallback_same_model"),
+            ("跨型号降级（能力会变）", "fallback_any_model"),
+        ):
+            self.policy_combo.addItem(label, value)
+        self.policy_combo.currentIndexChanged.connect(self._on_policy_changed)
+        mlay.addWidget(self.policy_combo)
+        self.manual_row.setVisible(False)
+        slay.addWidget(self.manual_row)
+
+        self.cfg_lab = QLabel("")
+        self.cfg_lab.setObjectName("dim")
+        self.cfg_lab.setFont(MONO)
+        slay.addWidget(self.cfg_lab)
 
         self.listen_lab = QLabel()
         self.listen_lab.setObjectName("dim")
@@ -194,12 +247,26 @@ class MainWindow(QMainWindow):
 
         btn_row = QHBoxLayout()
         btn_row.addStretch(1)
+        self.settings_btn = QPushButton("设置")
+        self.settings_btn.clicked.connect(self.show_settings)
+        btn_row.addWidget(self.settings_btn)
         self.toggle_btn = QPushButton("切到 MANUAL")
         self.toggle_btn.clicked.connect(self._toggle_mode)
         btn_row.addWidget(self.toggle_btn)
         outer.addLayout(btn_row)
 
         self.setCentralWidget(root)
+
+        # ── 接线（deps 存在时）──
+        if self.deps is not None:
+            # 状态里的模式跟配置对齐（GUI 是显示层，deps 是事实源）
+            self.state.set_mode(self.deps.mode)
+            # 目标下拉：每个候选一条，格式与 parse_target 的语法一致
+            for c in sorted(str(x) for x in self.deps.candidates):
+                self.target_combo.addItem(c)
+            # 每个请求收尾时把 trace 喂给状态（qasync 同线程，直接调用安全）
+            self.deps.on_request_done = self._on_route_done
+
         self._refresh()
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._refresh)
@@ -207,7 +274,65 @@ class MainWindow(QMainWindow):
 
     # ── 交互 ──
     def _toggle_mode(self) -> None:
-        self.state.set_mode("manual" if self.state.mode == "auto" else "auto")
+        self.apply_mode("manual" if self.state.mode == "auto" else "auto")
+
+    def apply_mode(self, mode: str) -> None:
+        """切模式。state（显示）和 deps（事实源）必须一起写，
+        只写一边就会出现「按钮变了但路由没变」的假切换。"""
+        self.state.set_mode(mode)
+        if self.deps is not None:
+            self.deps.mode = mode
+            if mode == "manual":
+                self.deps.target = self.target_combo.currentText() or None
+                self.deps.policy = self.policy_combo.currentData() or "strict"
+            else:
+                self.deps.target = None
+        has_target = self.target_combo.count() > 0
+        self.manual_row.setVisible(mode == "manual" and self.deps is not None
+                                   and has_target)
+        self._refresh()
+
+    def _on_target_changed(self, text: str) -> None:
+        if self.deps is not None and self.state.mode == "manual":
+            self.deps.target = text or None
+
+    def _on_policy_changed(self, _index: int) -> None:
+        if self.deps is not None and self.state.mode == "manual":
+            self.deps.policy = self.policy_combo.currentData() or "strict"
+
+    def _on_route_done(self, d: dict) -> None:
+        """app 层 on_request_done 回调 → 路由链 + 统计。"""
+        self.state.push_route(route_display_from_trace(d))
+
+    # ── 设置 ──
+    def show_settings(self) -> None:
+        """打开设置对话框；保存成功后交给 on_config_saved 编排（写文件/热重载）。"""
+        if self._config is None:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.information(self, "设置",
+                                    "当前没有加载配置文件，无可编辑内容。")
+            return
+        from .settings_dialog import SettingsDialog
+        dlg = SettingsDialog(self._config, self)
+        if dlg.exec() and self._on_config_saved is not None:
+            self._on_config_saved(dlg.result_config(), dlg.result_secrets())
+
+    def set_deps(self, deps: "GatewayDeps",
+                 config: "GatewayConfig | None" = None) -> None:
+        """热重载后换上新 deps：重新挂回调、重建目标下拉、对齐模式显示。"""
+        self.deps = deps
+        if config is not None:
+            self._config = config
+        # 旧的 on_request_done 指向 self，重挂即可
+        deps.on_request_done = self._on_route_done
+        self.target_combo.blockSignals(True)
+        self.target_combo.clear()
+        for c in sorted(str(x) for x in deps.candidates):
+            self.target_combo.addItem(c)
+        self.target_combo.blockSignals(False)
+        self.state.set_mode(deps.mode)
+        self.manual_row.setVisible(
+            deps.mode == "manual" and self.target_combo.count() > 0)
         self._refresh()
 
     # ── 刷新 ──
@@ -242,14 +367,30 @@ class MainWindow(QMainWindow):
             f"局域网设备访问 http://<本机IP>:{self.port}"
         )
 
-        # 账号表
+        # 配置摘要（有后端才知道；无后端保持空）
+        if self.deps is not None:
+            n_models = len({c.model for c in self.deps.candidates})
+            keys = self.deps.api_keys or (
+                [self.deps.api_key] if self.deps.api_key else [])
+            self.cfg_lab.setText(
+                f"配置 {self.config_path or '(内置)'} · "
+                f"{len(self.deps.candidates)} 候选 · {n_models} 型号 · "
+                f"鉴权 {len(keys)} key · "
+                f"破甲{'开' if self.deps.jailbreak_enabled else '关'}"
+            )
+
+        # 账号表：每次轮询从 Pool 拉实时状态
+        if self.deps is not None:
+            self.state.accounts = account_rows(self.deps.candidates, self.deps.pool)
         if len(self.state.accounts) != self.table.rowCount():
             self.table.setRowCount(len(self.state.accounts))
         for i, a in enumerate(self.state.accounts):
-            self.table.setItem(i, 0, QTableWidgetItem(a.provider))
-            self.table.setItem(i, 1, QTableWidgetItem(a.account))
-            self.table.setItem(i, 2, QTableWidgetItem(a.model))
-            self.table.setItem(i, 3, QTableWidgetItem(a.status_text))
+            for col, val in enumerate((a.provider, a.account, a.model,
+                                       a.status_text)):
+                item = QTableWidgetItem(val)
+                # 状态栏就是状态栏：全部只读（Qt 表格单元默认可双击编辑）
+                item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+                self.table.setItem(i, col, item)
 
         self.stat_lab.setText(
             f"调用 {st.total_calls} 次 · 降级 {st.downgrade_count} 次 · "
@@ -294,6 +435,9 @@ class GatewayTray(QSystemTrayIcon):
         act_show = QAction("显示面板", self)
         act_show.triggered.connect(self._show_window)
         m.addAction(act_show)
+        act_cfg = QAction("设置…", self)
+        act_cfg.triggered.connect(self.window.show_settings)
+        m.addAction(act_cfg)
         m.addSeparator()
 
         self.act_mode = QAction("切到 MANUAL", self)
@@ -333,7 +477,9 @@ class GatewayTray(QSystemTrayIcon):
         self.window.activateWindow()
 
     def _toggle_mode(self) -> None:
-        self.state.set_mode("manual" if self.state.mode == "auto" else "auto")
+        # 走窗口的实现 —— 那边会连 deps（事实源）一起切。
+        # tray 只改 state 的话就是「假切换」：显示变了，路由没变。
+        self.window._toggle_mode()
         self._refresh_tooltip()
 
     def _quit(self) -> None:

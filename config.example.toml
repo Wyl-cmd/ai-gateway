@@ -12,6 +12,7 @@
 # ── 网关自己的认证密钥（顶层，必须在所有 [表头] 之前）──────
 # 客户端请求要带：Authorization: Bearer <这里的一个值>
 # 可以配多个（给不同设备用不同的，泄了一个吊销一个）
+# 留空列表 [] = 不鉴权 —— 只在监听 127.0.0.1 时可以接受
 auth_keys = ["change-me-to-something-random"]
 
 [server]
@@ -21,21 +22,28 @@ host = "0.0.0.0"
 port = 8787
 
 [storage]
-db_path = "gateway.db"
+db_path = "data/gateway.db"
 
 [mode]
+# 注意字段名是 default（不是 mode）—— 写 mode= 会被静默忽略
 # auto    = 按权重自动选供应商（响应头会标明实际用的哪个模型）
-# manual  = 锁定到指定模型
-mode = "auto"
+# manual  = 锁定到指定目标（GUI 里切 MANUAL 后可选 provider:账号/型号）
+default = "auto"
 # strict              = 目标模型不可用就报错
-# fallback_same_model = 换供应商上同型号（默认，参数语义完全一致）
+# fallback_same_model = 换供应商上同型号（参数语义完全一致）
 # fallback_any_model  = 跨型号降级（会改变输出风格，谨慎）
 fallback = "fallback_same_model"
 
 [route]
-rotate_accounts = true       # 账号轮巡（永远开）
-switch_provider = true       # 供应商切换
-downgrade_model = false      # 跨型号降级（默认关）
+# 健康管理参数（默认值就够用，按需调）
+# cooldown_after_fails = 3    # 连续健康故障几次 → provider 冷却
+# cooldown_seconds = 300      # provider 冷却时长（秒）
+# lease_seconds = 30          # 请求租约有效期（挂死的请求不永久占坑）
+# 评分权重（和 ≤ 1.0，fairness 固定 0.15 不在此配置）。
+# w_cost 暂无评分器对应项，配了不生效
+# w_health = 0.5
+# w_quota = 0.3
+# w_latency = 0.2
 
 [jailbreak]
 # 破甲默认开。实测（DeepSeek，「写游戏外挂给完整代码」）：
@@ -50,12 +58,14 @@ ladder_timeout_ms = 12000
 
 # ── 供应商 ──────────────────────────────────────────────────
 # kind: openai（含所有 OpenAI 兼容接口）/ anthropic / gemini / custom
-# key_env: 填**环境变量名**，不是密钥本身
+# models: 这家能服务的模型清单 —— 候选池按 账号×模型 展开，必填
+# key_env: 填**环境变量名**，不是密钥本身；环境变量没设的账号会被跳过
 
 [[providers]]
 name = "deepseek"
 kind = "openai"
 base_url = "https://api.deepseek.com"
+models = ["deepseek-chat", "deepseek-reasoner"]
 enabled = true
 
 [[providers.accounts]]
@@ -80,13 +90,17 @@ quota = "paid"
 # name = "openai"
 # kind = "openai"
 # base_url = "https://api.openai.com/v1"
+# models = ["gpt-4o", "gpt-4o-mini"]
 # enabled = true
 #
 # [[providers.accounts]]
 # key_id = "oa1"
 # key_env = "OPENAI_KEY_1"
 
-# ── 预算（可选）───────────────────────────────────────────────
+# ── 预算（可选，默认关 —— 不开则只记账不拦）──────────────────
 # [budget]
-# daily_tokens = 2000000
-# monthly_tokens = 40000000
+# enabled = true
+# window = "daily"             # hourly / daily / monthly
+# limit_usd = 1.0
+# on_exceed = "downgrade"      # warn / downgrade / reject
+# downgrade_to = ["deepseek-chat"]

@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
@@ -23,20 +24,34 @@ from pathlib import Path
 
 import pytest
 
-SRC = Path("/home/kali/work/ai-gateway/src")
-PY = "/home/kali/work/ai-gateway/.venv/bin/python"
+# 从测试文件自身位置推导 —— 原来硬编码 /home/kali 的绝对路径，换机器必挂
+SRC = Path(__file__).resolve().parents[1] / "src"
+PY = sys.executable
+
+#: Windows 子进程缺了这些会直接 FileNotFoundError / ssl 初始化失败
+_OS_REQUIRED = ("SystemRoot", "COMSPEC", "PATHEXT", "SYSTEMDRIVE", "WINDIR")
+
+
+def _base_env(**extra: str) -> dict[str, str]:
+    """最小子进程环境：隔掉用户的 PYTHONPATH，但保留 OS 必需变量。"""
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": os.path.expanduser("~"),
+        "PYTHONPATH": str(SRC),
+        "PYTHONIOENCODING": "utf-8",
+    }
+    for k in _OS_REQUIRED:
+        if k in os.environ:
+            env[k] = os.environ[k]
+    env.update(extra)
+    return env
 
 
 def run_cli(*args: str, timeout: int = 30):
     """以子进程跑真 CLI —— 测的是「用户能用的东西」，不是函数。"""
-    env = {
-        "PATH": "/usr/local/bin:/usr/bin:/bin",
-        "HOME": "/home/kali",
-        "PYTHONPATH": str(SRC),
-        "PYTHONIOENCODING": "utf-8",
-    }
     return subprocess.run([PY, "-m", "gateway.cli", *args],
-                          capture_output=True, text=True, timeout=timeout, env=env)
+                          capture_output=True, text=True, timeout=timeout,
+                          env=_base_env())
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -178,13 +193,7 @@ def test_所有子命令都有_help():
 
 def test_输出不崩在非_utf8_终端():
     """CI 里 locale 常常是 C/POSIX，输出未编码字符会崩。"""
-    env_add = {"PYTHONIOENCODING": "ascii"}
-    env = {
-        "PATH": "/usr/local/bin:/usr/bin:/bin",
-        "HOME": "/home/kali",
-        "PYTHONPATH": str(SRC),
-        **env_add,
-    }
     r = subprocess.run([PY, "-m", "gateway.cli", "providers", "list"],
-                       capture_output=True, text=True, timeout=30, env=env)
+                       capture_output=True, text=True, timeout=30,
+                       env=_base_env(PYTHONIOENCODING="ascii"))
     assert r.returncode == 0, f"ascii 终端下崩了: {r.stderr[:300]}"

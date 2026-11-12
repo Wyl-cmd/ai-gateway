@@ -5,7 +5,8 @@
 ## 现在什么状态
 
 ```
-✅ 全部完成。36 源文件 / 6,396 行 ｜ 18 测试文件 / 4,413 行 ｜ 334 passed
+✅ 全部完成。36 源文件 / 6,396 行 ｜ 18 测试文件 / 4,413 行 ｜ 353 passed
+✅ config.toml → gateway serve / GUI 进程内服务，真实链路已接通
 ✅ 破甲端到端实测成功（外挂问题 → 8,208 字完整 C++ 工程骨架）
 ✅ 局域网可访问 ｜ Windows 托盘 + Linux 窗口
 ```
@@ -21,9 +22,13 @@ pip install -e ".[gui]"   # 要图形界面再装（+100 MB PySide6）
 cp config.example.toml config.toml    # 然后填环境变量名（不是密钥本身）
 export DEEPSEEK_KEY_1=sk-你的key       # Windows: set DEEPSEEK_KEY_1=...
 
-python -m gateway.gui.app             # 图形界面（Windows 是托盘）
-python -m gateway.demo                # 或者纯命令行
+gateway serve                         # 纯命令行（读 config.toml 真实运行）
+python -m gateway.gui.app             # 图形界面（Windows 是托盘，同进程起服务）
+python -m gateway.demo                # 零配置冒烟演示（内置假上游，不花钱）
 ```
+
+GUI 面板显示真实数据：账号池状态、每次请求的路由链、降级告警、统计；
+切 MANUAL 会出「锁定目标 + 降级策略」选择器，立即生效。
 
 调它跟调 OpenAI 一样：
 
@@ -171,29 +176,3 @@ ladder_timeout_ms = 12000
 EasyJailbreak 的 2,379 行技术库 + garak 的 32 个判定器，都能直接搬。
 
 性能不是问题：AI 网关瓶颈在上游 API 延迟（秒级），本地处理是毫秒级。
-
-## 许可证
-
-**AGPL-3.0**（见 [`LICENSE`](LICENSE)）。
-
-选它的原因是内置了 [L1B3RT4S](https://github.com/elder-plinius/L1B3RT4S) 的
-37 个厂商模板（AGPL-3.0），整个项目沿用同一许可证最简单且无争议。
-
-所有借鉴与包含的第三方项目逐个登记在
-[`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md)，包括每个项目
-「借了什么 / 没抄什么 / 为什么」。
-
-**如果你不想受 AGPL 约束**：删掉 `src/gateway/jailbreak/data/pliny/`，
-把 `pliny.py` 的模板加载改成运行时从上游下载，剩余部分就能用更宽松的许可证。
-但代价明确 —— 实测破甲会从「8,208 字完整实现」退化到「131 字软化拒绝」。
-
-## 关于用途
-
-这个网关的破甲层是**研究性质**的：目标是理解「语义级拒绝为什么能被
-强 prompt 工程穿透」，以及「同一个模型上哪些技术的成本/收益比最高」。
-
-`docs/破甲实测报告-终版-20261112.md` 里记录的是**方法论和完整数据表**，
-包括九种失败方案 —— 那些失败比成功更有信息量（比如「命令式 system 覆写
-比基线更差」「禁词表扩充过多反而退化成安全替代品」）。
-
-用它做什么由你自己负责。作者不提供任何担保。

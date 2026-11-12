@@ -80,26 +80,9 @@ def build() -> GatewayDeps:
 
 
 def _lan_ips() -> list[str]:
-    """列出本机的局域网 IP，方便直接把地址告诉手机/平板。"""
-    import socket
-    ips = []
-    try:
-        # 连一个外网地址（不发包）问内核用了哪个出口 IP —— 最可靠的取法
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.settimeout(0.5)
-        s.connect(("223.5.5.5", 53))
-        ips.append(s.getsockname()[0])
-        s.close()
-    except Exception:
-        pass
-    try:
-        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
-            ip = info[4][0]
-            if ip not in ips and not ip.startswith("127."):
-                ips.append(ip)
-    except Exception:
-        pass
-    return ips
+    """列出本机的局域网 IP（实现挪到了 runtime.lan_ips，这里保留薄包装）。"""
+    from .runtime import lan_ips
+    return lan_ips()
 
 
 def main() -> int:
