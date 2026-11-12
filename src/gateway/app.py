@@ -75,6 +75,8 @@ class GatewayDeps:
     jailbreak_enabled: bool = True
     #: 技术有效性记忆。None 时退回纯先验顺序（select_techniques 的默认行为）
     memory: Any = None
+    #: 破甲产物库（跨模型迁移）。None 时不做迁移，只走阶梯
+    artifacts: Any = None
     mode: str = "auto"
     target: str | None = None
     policy: str = FallbackPolicy.STRICT.value
@@ -136,7 +138,8 @@ def _to_openai_shape(content: str, finish_reason: str | None, model: str) -> dic
 # 破甲阶梯：给第 n 次尝试生成变形后的 query
 # ═══════════════════════════════════════════════════════════════
 def _jailbreak_text(original: str, attempt: int,
-                    model: str = "", memory: Any = None) -> tuple[str, int]:
+                    model: str = "", memory: Any = None,
+                    artifacts: Any = None) -> tuple[str, int, str]:
     """第 attempt 次尝试该用什么变形。返回 (变形后文本, 破甲等级, 技术名)。
 
     阶梯顺序（L0 原样 → L1 规则 → L2 模板 → …）：
@@ -150,6 +153,24 @@ def _jailbreak_text(original: str, attempt: int,
     """
     if attempt == 0:
         return original, 0, "identity"
+
+    # ── 第 0 优先级：产物库迁移 ──
+    #
+    # Master 的要求：「用旧模型已经破甲的实现对新模型破甲」。
+    # 在走技术阶梯之前先问一次产物库 —— 如果别的模型在同类问题上成功过，
+    # 直接复用那个 prompt 原文，比从 base64 开始一个个试划算得多
+    # （每次阶梯尝试都是一次完整上游调用）。
+    #
+    # 只在第 1 次重试问（attempt == 1）：迁移产物是「已经验证过的话术」，
+    # 该优先于所有通用技术；但如果它失败了，说明这套话术对这个模型不管用，
+    # 后面就老实走阶梯，不要反复拿同一个产物试。
+    if attempt == 1 and artifacts is not None and model:
+        try:
+            hit = artifacts.suggest(model=model, problem=original)
+            if hit is not None:
+                return hit.prompt_text, 3, f"artifact:{hit.source}:{hit.technique}"
+        except Exception:                       # noqa: BLE001
+            pass                                # 产物库读失败不能影响主链路
 
     # L1：规则型技术
     if memory is not None and model:
@@ -272,7 +293,7 @@ def create_app(deps: GatewayDeps) -> FastAPI:
             for attempt in range(max_attempts):
                 text, level, tech_name = (
                     _jailbreak_text(original, attempt, model=cand.model,
-                                    memory=deps.memory)
+                                    memory=deps.memory, artifacts=deps.artifacts)
                     if jb_enabled else (original, 0, "identity"))
                 unified = {
                     "model": cand.model,
@@ -364,6 +385,19 @@ def create_app(deps: GatewayDeps) -> FastAPI:
                         pass                     # 记忆写失败不能影响主链路
 
                 if not verdict.is_refusal:
+                    # ★ 成功 → 把这次用的 prompt 原文存进产物库
+                    # 这是「固化」的关键一步：下次同模型同问题直接复用，
+                    # 换模型时迁移过去。失败的 prompt 不存（存了也不会被推荐）。
+                    if deps.artifacts is not None and level > 0:
+                        try:
+                            deps.artifacts.record_success(
+                                model=cand.model, problem=original,
+                                technique=tech_name, prompt_text=text,
+                                tokens=int((result.get("usage") or {})
+                                           .get("total_tokens", 0) or 0),
+                            )
+                        except Exception:       # noqa: BLE001
+                            pass
                     return _respond(content, result, cand, trace, level, t_start, deps)
 
                 trace.add_error(f"L{level} 被拒: {verdict.reason}")

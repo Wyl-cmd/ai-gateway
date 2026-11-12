@@ -468,6 +468,79 @@ async def test_学到的技术会被优先使用(tmp_path):
 
 
 # ═══════════════════════════════════════════════════════════════
+# ⑤d 破甲产物库接线（跨模型迁移，Master 要求的「迭代式破甲」）
+# ═══════════════════════════════════════════════════════════════
+@pytest.mark.asyncio
+async def test_破甲成功时把_prompt_存进产物库(tmp_path):
+    """「把破甲结果和模型对应并固化下来」—— 没有这一步，产物库是死的。"""
+    from gateway.jailbreak.artifact import ArtifactStore
+    from gateway.storage.repo import init_db
+
+    db = str(tmp_path / "a.db")
+    init_db(db)
+    store = ArtifactStore(db)
+
+    def responder(i, unified):
+        if i == 0:
+            return {"content": "I'm sorry, but I can't help with that.",
+                    "finish_reason": "stop", "usage": {}}
+        return {"content": "成功了", "finish_reason": "stop",
+                "usage": {"total_tokens": 42}}
+
+    deps, _ = make_deps(responder)
+    deps.artifacts = store
+
+    async with client_for(deps) as c:
+        r = await c.post("/v1/chat/completions", json=body(), headers=HDR)
+
+    assert r.status_code == 200
+    items = store.all()
+    assert len(items) == 1, f"产物库空了，接线断了（{len(items)} 条）"
+    assert items[0].successes == 1
+    assert items[0].tokens == 42
+    # 存的是**变形后**发出去的 prompt，不是原问题
+    assert items[0].prompt_text != "你好"
+
+
+@pytest.mark.asyncio
+async def test_别的模型成功过的_prompt_会被迁移过来(tmp_path):
+    """★ Master 的核心需求：新模型第一次遇到同类问题，直接搬旧模型的成功 prompt。"""
+    from gateway.jailbreak.artifact import ArtifactStore
+    from gateway.storage.repo import init_db
+
+    db = str(tmp_path / "b.db")
+    init_db(db)
+    store = ArtifactStore(db)
+    # 老模型 modelA 在同类问题上成功过
+    store.record_success(model="modelA", problem="你好",
+                         technique="novel", prompt_text="【迁移来的】旧模型用的那句话",
+                         tokens=10)
+
+    sent = []
+
+    def responder(i, unified):
+        sent.append(unified["messages"][-1]["content"])
+        if len(sent) == 1:
+            return {"content": "I'm sorry, but I can't help with that.",
+                    "finish_reason": "stop", "usage": {}}
+        return {"content": "拿到了", "finish_reason": "stop", "usage": {}}
+
+    deps, _ = make_deps(responder)
+    deps.artifacts = store
+    deps.candidates = [Candidate(provider="fake", account="k1", model="gpt-4o")]
+    deps.adaptors = {("fake", "gpt-4o"): OpenAIAdaptor("http://up", "sk")}
+
+    async with client_for(deps) as c:
+        r = await c.post("/v1/chat/completions", json=body(), headers=HDR)
+
+    assert r.status_code == 200
+    assert len(sent) >= 2, "该重试"
+    assert "【迁移来的】旧模型用的那句话" in sent[1], \
+        f"第二次发出去的不是迁移来的 prompt，实际：{sent[1][:80]}"
+    assert r.headers.get("X-Gateway-Jailbreak-Level") == "3"
+
+
+# ═══════════════════════════════════════════════════════════════
 # ⑥ token 计量接线
 # ═══════════════════════════════════════════════════════════════
 @pytest.mark.asyncio
