@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=AI Gateway
+Name[zh_CN]=AI 网关
+GenericName=LLM Router
+GenericName[zh_CN]=AI 路由网关
+Comment=Unified entry with auto jailbreak, smart routing and multi-account circuit breaking
+Comment[zh_CN]=统一入口 + 自动破甲 + 智能路由 + 多账号熔断
+Exec=ai-gateway-linux
+Icon=ai-gateway
+Terminal=false
+Categories=Development;Utility;
+Keywords=ai;llm;gateway;router;
+StartupNotify=true
+StartupWMClass=ai-gateway-linux
