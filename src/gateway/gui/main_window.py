@@ -138,6 +138,7 @@ class MainWindow(QMainWindow):
                  deps: "GatewayDeps | None" = None,
                  config: "GatewayConfig | None" = None,
                  config_path: str = "",
+                 warnings: list[str] | None = None,
                  on_config_saved=None) -> None:
         super().__init__()
         self.state = state
@@ -148,6 +149,8 @@ class MainWindow(QMainWindow):
         self.deps = deps
         self._config = config
         self.config_path = config_path
+        # 装配警告（如「密钥未设置，该账号被跳过」）—— 空账号池必须给个说法
+        self._config_warnings = list(warnings or [])
         self._on_config_saved = on_config_saved
 
         self.setWindowTitle("AI 路由网关")
@@ -209,6 +212,13 @@ class MainWindow(QMainWindow):
         self.cfg_lab.setObjectName("dim")
         self.cfg_lab.setFont(MONO)
         slay.addWidget(self.cfg_lab)
+
+        # 装配警告：哪家被跳过、为什么（否则空账号池是个哑谜）
+        self.warn2_lab = QLabel("")
+        self.warn2_lab.setObjectName("warn")
+        self.warn2_lab.setWordWrap(True)
+        self.warn2_lab.setVisible(False)
+        slay.addWidget(self.warn2_lab)
 
         self.listen_lab = QLabel()
         self.listen_lab.setObjectName("dim")
@@ -313,16 +323,24 @@ class MainWindow(QMainWindow):
                                     "当前没有加载配置文件，无可编辑内容。")
             return
         from .settings_dialog import SettingsDialog
-        dlg = SettingsDialog(self._config, self)
+        # secrets.toml 和 config.toml 同目录 —— 对话框打开时回显已存 Key
+        secrets_path = None
+        if self.config_path:
+            from pathlib import Path
+            secrets_path = Path(self.config_path).parent / "secrets.toml"
+        dlg = SettingsDialog(self._config, self, secrets_path=secrets_path)
         if dlg.exec() and self._on_config_saved is not None:
             self._on_config_saved(dlg.result_config(), dlg.result_secrets())
 
     def set_deps(self, deps: "GatewayDeps",
-                 config: "GatewayConfig | None" = None) -> None:
+                 config: "GatewayConfig | None" = None,
+                 warnings: list[str] | None = None) -> None:
         """热重载后换上新 deps：重新挂回调、重建目标下拉、对齐模式显示。"""
         self.deps = deps
         if config is not None:
             self._config = config
+        if warnings is not None:
+            self._config_warnings = list(warnings)
         # 旧的 on_request_done 指向 self，重挂即可
         deps.on_request_done = self._on_route_done
         self.target_combo.blockSignals(True)
@@ -378,6 +396,18 @@ class MainWindow(QMainWindow):
                 f"鉴权 {len(keys)} key · "
                 f"破甲{'开' if self.deps.jailbreak_enabled else '关'}"
             )
+
+        # 装配警告最多显示前 3 条（更多只给条数，避免刷屏）
+        if self._config_warnings:
+            shown = self._config_warnings[:3]
+            extra = len(self._config_warnings) - len(shown)
+            text = "⚠ " + "\n⚠ ".join(shown)
+            if extra > 0:
+                text += f"\n⚠ …另有 {extra} 条"
+            self.warn2_lab.setText(text)
+            self.warn2_lab.setVisible(True)
+        else:
+            self.warn2_lab.setVisible(False)
 
         # 账号表：每次轮询从 Pool 拉实时状态
         if self.deps is not None:

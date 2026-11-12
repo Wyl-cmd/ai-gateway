@@ -367,3 +367,40 @@ def test_设置对话框_变量名与账号ID自动补全():
     assert acc.key_env == "MY_RELAY_KEY_1"
     # 密钥和自动生成的变量名正确配对
     assert dlg.result_secrets() == [("MY_RELAY_KEY_1", "sk-xyz")]
+
+
+def test_设置对话框_回显已保存的密钥():
+    """打开设置页能看到 secrets.toml 里已存的 Key（本地自用，明文回显）。"""
+    pytest.importorskip("PySide6")
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    from PySide6.QtWidgets import QApplication, QDialog
+    app = QApplication.instance() or QApplication([])
+
+    from gateway.config import GatewayConfig
+    from gateway.gui.settings_dialog import SettingsDialog
+
+    (tmp := __import__("pathlib").Path("secrets-test-display.toml")).write_text(
+        'RELAY_KEY = "sk-saved-999"\n', encoding="utf-8")
+    try:
+        cfg = GatewayConfig.model_validate({
+            "providers": [{"name": "relay", "kind": "openai", "base_url": "http://x",
+                           "models": ["m1"],
+                           "accounts": [{"key_id": "k1", "key_env": "RELAY_KEY"}]}],
+        })
+        dlg = SettingsDialog(cfg, secrets_path=tmp)
+        assert dlg.acct_table.item(0, 1).text() == "sk-saved-999"
+
+        # 没改动就保存 → 不重复提交这个密钥（结果 secrets 为空）
+        dlg._on_save()
+        assert dlg.result() == QDialog.Accepted.value
+        assert dlg.result_secrets() == []
+
+        # 改成新 Key → 只提交新的
+        dlg2 = SettingsDialog(cfg, secrets_path=tmp)
+        dlg2.acct_table.item(0, 1).setText("sk-rotated-new")
+        dlg2._on_save()
+        assert dlg2.result_secrets() == [("RELAY_KEY", "sk-rotated-new")]
+    finally:
+        tmp.unlink(missing_ok=True)

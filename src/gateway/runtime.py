@@ -120,15 +120,25 @@ def assemble(
     config: GatewayConfig,
     env: Mapping[str, str] | None = None,
     secrets_path: str | os.PathLike[str] | None = "secrets.toml",
+    warnings: list[str] | None = None,
 ) -> GatewayDeps:
     """装配主入口。env 参数便于测试注入，默认读 os.environ。
 
     密钥查找顺序：**环境变量 > secrets.toml**（显式环境变量是用户手动设的，
     应该赢；secrets.toml 是设置页写的常规存放处）。两个地方都没有 → 跳账号。
 
+    `warnings` 传列表进来会收集「谁被跳了、为什么」—— GUI 拿去展示，
+    否则空账号池对用户是哑谜（踩过：没填 API Key → 候选 0 → 表格空白无解释）。
+
     不会因为个别账号/供应商配置不全而失败 —— 网关的哲学是「能跑多少跑多少」，
     缺的东西警告出来让用户知道，而不是整个启动失败。
     """
+
+    def say(msg: str) -> None:
+        _warn(msg)
+        if warnings is not None:
+            warnings.append(msg)
+
     # 环境变量优先于密钥文件（与 load_config「环境变量 > 文件」一致）
     e = {**load_secrets(secrets_path),
          **(os.environ if env is None else dict(env))}
@@ -141,19 +151,19 @@ def assemble(
         if not p.enabled:
             continue
         if not p.models:
-            _warn(f"provider {p.name} 没配 models，跳过（无法参与选路）")
+            say(f"provider {p.name} 没配 models，跳过（无法参与选路）")
             continue
 
         cls = KIND_TO_ADAPTOR.get(p.kind)
         if cls is None:                        # 理论上 pydantic 已挡住，双保险
-            _warn(f"provider {p.name} 的 kind={p.kind} 没有适配器，跳过")
+            say(f"provider {p.name} 的 kind={p.kind} 没有适配器，跳过")
             continue
 
         for acc in p.accounts:
             key = e.get(acc.key_env, "")
             if not key:
-                _warn(f"provider {p.name} 账号 {acc.key_id} 的环境变量 "
-                      f"{acc.key_env} 未设置，跳过该账号")
+                say(f"供应商 {p.name} 的密钥未设置（secrets.toml / 环境变量"
+                    f"里都没有 {acc.key_env}），该账号被跳过")
                 continue
             # 每账号一个实例：API key 活在适配器里（见模块 docstring）
             adaptors[(p.name, acc.key_id)] = cls(p.base_url, key)
@@ -163,12 +173,13 @@ def assemble(
                 )
 
     if not candidates:
-        _warn("没有任何可用候选 —— 检查 config.toml 的 providers/models/环境变量")
+        say("没有任何可用候选 —— 检查 providers 的 models 和密钥"
+            "（secrets.toml 或环境变量）")
 
     # auth_keys 空 = 不鉴权（config.py 的既定语义）。绑定非本机地址时提醒一句。
     if not config.auth_keys and config.server.host not in ("127.0.0.1", "localhost"):
-        _warn("auth_keys 为空 = 网关不鉴权，而监听地址不是本机回环 —— "
-              "局域网内任何人都能用你的上游 key")
+        say("auth_keys 为空 = 网关不鉴权，而监听地址不是本机回环 —— "
+            "局域网内任何人都能用你的上游 key")
 
     # 破甲记忆/产物库：SQLite 就绪就接上（能学就学，失败不挡路）
     memory: Any = None

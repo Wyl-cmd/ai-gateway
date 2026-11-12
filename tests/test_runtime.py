@@ -205,3 +205,20 @@ def test_密钥文件不存在_不炸(tmp_path):
     deps = assemble(_config([_provider()], tmp_path=tmp_path),
                     env={}, secrets_path=tmp_path / "nope.toml")
     assert deps.candidates == []          # 两把 key 都没有 → 账号全跳过
+
+
+# ═══════════════════════════════════════════════════════════════
+# 装配警告收集（GUI 要展示「为什么是空的」）
+# ═══════════════════════════════════════════════════════════════
+def test_缺密钥的跳过原因进警告列表(tmp_path):
+    """GUI 的空账号池要有话说：谁被跳了、为什么。"""
+    warns = []
+    assemble(_config([_provider()], tmp_path=tmp_path), env={},
+             warnings=warns)
+    assert any("FAKE_X_KEY_1" in w for w in warns), "警告里要带上存储键名"
+    assert any("fake" in w for w in warns), "警告里要带上供应商名"
+
+
+def test_警告列表可传可不传_不传不炸(tmp_path):
+    deps = assemble(_config([_provider()], tmp_path=tmp_path), env={})
+    assert deps.candidates == []

@@ -64,7 +64,10 @@ def run_gui(*, host: str | None = None, port: int | None = None,
 
     # ── 装配（后端是真的）──
     config = load_config(config_path)
-    deps = assemble(config)
+    # 警告收集：形如「密钥未设置，该账号被跳过」—— 面板上要显示，
+    # 否则候选为 0 时用户只能看到空表格，不知道为什么
+    startup_warnings: list[str] = []
+    deps = assemble(config, warnings=startup_warnings)
     host = host or config.server.host
     port = port or config.server.port
 
@@ -131,10 +134,11 @@ def run_gui(*, host: str | None = None, port: int | None = None,
             except Exception:                         # noqa: BLE001
                 pass
             await asyncio.sleep(0.3)          # 等 OS 释放端口（Windows 需要）
-            new_deps = assemble(new_cfg)
+            reload_warnings: list[str] = []
+            new_deps = assemble(new_cfg, warnings=reload_warnings)
             server = _new_server(new_deps)
             server_task = loop.create_task(server.serve())
-            win.set_deps(new_deps, new_cfg)
+            win.set_deps(new_deps, new_cfg, reload_warnings)
             if mode == GUIMode.TRAY:
                 tray.showMessage("AI 路由网关", "配置已保存并重载",
                                  QSystemTrayIcon.Information, 2000)
@@ -153,6 +157,7 @@ def run_gui(*, host: str | None = None, port: int | None = None,
 
         win = MainWindow(st, host=host, port=port, on_quit="tray",
                          deps=deps, config=config, config_path=config_path,
+                         warnings=startup_warnings,
                          on_config_saved=_on_config_saved)
         tray = GatewayTray(st, win, port=port)
         tray.show()
@@ -170,6 +175,7 @@ def run_gui(*, host: str | None = None, port: int | None = None,
     # 窗口模式
     win = MainWindow(st, host=host, port=port, on_quit=None,
                      deps=deps, config=config, config_path=config_path,
+                     warnings=startup_warnings,
                      on_config_saved=_on_config_saved)
     win.show()
     with loop:

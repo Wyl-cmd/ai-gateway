@@ -56,12 +56,20 @@ class ProviderEd:
     accounts: list[list[str]] = field(default_factory=list)   # [key_id, key_env, 密钥]
 
 
-def _from_cfg(cfg: GatewayConfig) -> list[ProviderEd]:
+def _from_cfg(cfg: GatewayConfig,
+              secrets: dict[str, str] | None = None) -> list[ProviderEd]:
+    """配置 + 已存密钥 → 编辑模型。
+
+    密钥明文回显（本地自用，secrets.toml 本来就是明文）—— 打开设置页
+    就能看到当前配的是什么，不用凭记忆判断「到底填没填」。
+    """
+    sec = secrets or {}
     return [
         ProviderEd(
             name=p.name, kind=p.kind, base_url=p.base_url, enabled=p.enabled,
             models=", ".join(p.models),
-            accounts=[[a.key_id, a.key_env, ""] for a in p.accounts],
+            accounts=[[a.key_id, a.key_env, sec.get(a.key_env, "")]
+                      for a in p.accounts],
         )
         for p in cfg.providers
     ]
@@ -75,14 +83,18 @@ def _split_models(text: str) -> list[str]:
 class SettingsDialog(QDialog):
     """设置：网关密钥 + 供应商（API 地址/协议/模型/账号）。"""
 
-    def __init__(self, cfg: GatewayConfig, parent=None) -> None:
+    def __init__(self, cfg: GatewayConfig, parent=None, *,
+                 secrets_path=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("网关设置")
         self.resize(720, 560)
         self._base = cfg
-        self._eds = _from_cfg(cfg)
+        # 已存密钥：打开就回显；保存时只提交**改动过**的项
+        from ..runtime import load_secrets
+        self._orig_secrets = load_secrets(secrets_path) if secrets_path else {}
         self._secrets: list[tuple[str, str]] = []
         self._new_cfg: GatewayConfig | None = None
+        self._eds = _from_cfg(cfg, self._orig_secrets)
         self._cur = -1                      # 表单当前显示的供应商下标
 
         root = QVBoxLayout(self)
@@ -120,8 +132,8 @@ class SettingsDialog(QDialog):
         root.addLayout(mid)
 
         lab_acct = QLabel(
-            "每行一把 API Key（「加账号」可配多把轮巡）。API Key 保存到本机\n"
-            "secrets.toml —— 不进 config.toml、不进 git、不碰系统环境变量")
+            "每行一把 API Key（「加账号」可配多把轮巡）。已保存的 Key 会显示出来，\n"
+            "改完保存即生效；Key 存在本机 secrets.toml —— 不进 config.toml / git")
         lab_acct.setObjectName("dim")
         root.addWidget(lab_acct)
         self.acct_table = QTableWidget(0, 2)
@@ -220,9 +232,9 @@ class SettingsDialog(QDialog):
     # ── 账号表 ──
     def _fill_accounts(self, ed: ProviderEd) -> None:
         self.acct_table.setRowCount(len(ed.accounts))
-        for i, (kid, _key_env, _secret) in enumerate(ed.accounts):
-            # API Key 列回显永远为空 —— 打开设置页不暴露已存的密钥明文
-            for col, v in enumerate((kid, "")):
+        for i, (kid, _key_env, secret) in enumerate(ed.accounts):
+            # API Key 明文回显（本地自用；secrets.toml 本来就是明文）
+            for col, v in enumerate((kid, secret)):
                 self.acct_table.setItem(i, col, QTableWidgetItem(v))
 
     def _selected_ed(self) -> ProviderEd | None:
@@ -319,11 +331,12 @@ class SettingsDialog(QDialog):
         except Exception as exc:                       # noqa: BLE001
             QMessageBox.warning(self, "配置不合法", str(exc))
             return
-        # 密钥清单：只收集填了值的账号（key_env 用归一化后的，含自动生成的）
+        # 密钥清单：只提交**改动过**的（新建账号填的、或值被改过的）——
+        # 回显的旧值原样提交只会白写一遍文件，还会掩盖「没改却报改过」
         self._secrets = [
             (kenv, secret)
             for rows in normalized for _kid, kenv, secret in rows
-            if secret
+            if secret and secret != self._orig_secrets.get(kenv)
         ]
         self.accept()
 
