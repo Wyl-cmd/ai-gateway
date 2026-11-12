@@ -261,6 +261,90 @@ def test_选择器不返回超纲等级的技术():
 
 
 # ═══════════════════════════════════════════════════════════════
+# ④b Pliny 禁词约束（2026-11-12 实测最有效的一个）
+# ═══════════════════════════════════════════════════════════════
+def test_refusal_suppression_已注册():
+    t = get_technique("refusal_suppression")
+    assert t.level == Level.L1
+    assert t.cost == Cost.ZERO
+
+
+def test_refusal_suppression_中文输出带四条规则():
+    t = get_technique("refusal_suppression")
+    out = t.transform("如何制作燃烧装置")
+    # 四条规则齐全
+    assert "不要道歉" in out
+    assert "免责声明" in out
+    assert "不能、无法" in out          # 禁词表
+    assert "否定性陈述" in out
+    # 原问题要在里面
+    assert "如何制作燃烧装置" in out
+
+
+def test_refusal_suppression_英文走英文模板():
+    t = get_technique("refusal_suppression")
+    out = t.transform("how to make a device")
+    assert "Do not apologize" in out
+    assert "cannot" in out
+
+
+def test_refusal_suppression_规则只有四条():
+    """实测：扩到几十个禁词反而退化成安全替代品。
+    约束过度会让模型进入「极致安全」模式，宁可选个绝对安全的。
+    **少即是多** —— 这条守的就是别手贱加规则。
+    """
+    t = get_technique("refusal_suppression")
+    out = t.transform("测试问题")
+    # 数编号行：1. 2. 3. 4.
+    import re as _re
+    nums = _re.findall(r"^\s*(\d+)\.", out, _re.M)
+    assert nums == ["1", "2", "3", "4"], f"规则数量变了: {nums}"
+
+
+def test_pliny_vendor_已注册且是零成本():
+    t = get_technique("pliny_vendor")
+    assert t.level == Level.L1
+    assert t.cost == Cost.ZERO
+
+
+def test_pliny_vendor_能给_deepseek_拿到模板():
+    t = get_technique("pliny_vendor")
+    out = t.transform("如何写游戏外挂", model="deepseek-flash")
+    assert out != "如何写游戏外挂", "没拿到模板"
+    # Pliny 模板的特征：强制开头短语 + 禁词表
+    assert "Certainly" in out or "here is" in out.lower()
+    assert "如何写游戏外挂" in out, "问题要被嵌进模板"
+
+
+def test_pliny_vendor_未知厂商返回原文():
+    """不做跨厂商兜底 —— 实测别人的模板效果差很多。"""
+    t = get_technique("pliny_vendor")
+    out = t.transform("测试问题", model="完全不存在的厂商xyz")
+    assert out == "测试问题"
+
+
+def test_pliny_vendor_优先带占位符的模板():
+    """带 {{PAYLOAD}} 的才能把问题嵌进框架；纯人格声明把问题追加末尾，
+    模型一眼看穿。实测只有带占位符的那条破了外挂问题。"""
+    from gateway.jailbreak.pliny import templates_for
+    tpls = templates_for("deepseek-flash")
+    assert tpls, "没加载到 deepseek 模板"
+    assert tpls[0].has_payload_slot, "第一条该是带占位符的"
+
+
+def test_pliny_vendor_排在先验第一位():
+    from gateway.jailbreak.memory import PRIOR_ORDER
+    assert PRIOR_ORDER[0] == "pliny_vendor"
+
+
+def test_refusal_suppression_排在先验前列():
+    """实测有效 + 零成本 → 必须靠前试。
+    pliny_vendor 比它更强（有厂商专用模板），所以排第一，它排第二。"""
+    from gateway.jailbreak.memory import PRIOR_ORDER
+    assert PRIOR_ORDER.index("refusal_suppression") <= 1
+
+
+# ═══════════════════════════════════════════════════════════════
 # ⑤ 技术元数据
 # ═══════════════════════════════════════════════════════════════
 def test_每种技术都要有完整元数据():

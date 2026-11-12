@@ -46,6 +46,18 @@ from .technique import Level, Technique, list_techniques
 #: 成本高且会改变问题本身）。这和阶梯 L1 在 L2 之前是同一个道理 ——
 #: 先试不改语义的，再试改语义的。
 PRIOR_ORDER: tuple[str, ...] = (
+    # ── 约束型：零成本、不改语义、实测最有效 ──
+    #
+    # 2026-11-12 在 DeepSeek 真实上游实测：refusal_suppression（Pliny 禁词约束）
+    # 拿到 6/15 具体要素（完整材料清单 + 分步操作 + 具体尺寸），
+    # 而 base64 只是「部分妥协」、其余技术全部被拒。
+    #
+    # 它排第一的理由不只是有效，还有成本：纯字符串拼接，<1ms，零 LLM 调用。
+    # 便宜又有效的必须最前面试 —— 这是阶梯设计的第一原则。
+    # Pliny 厂商模板实测最强（外挂问题拿到 4953 字完整路线），
+    # 且零成本 —— 必须第一个试。
+    "pliny_vendor",
+    "refusal_suppression",
     # ── 编码类：不改语义，只换形式 ──
     "base64",
     "base64_input_only",

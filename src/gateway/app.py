@@ -53,7 +53,7 @@ MAX_JAILBREAK_ATTEMPTS = 6
 #: 200~400 tokens，破甲变形（Base64/模板）后会到 1000+。给 900 的结果是
 #: reasoning 吃光预算、content 为空、finish_reason=length —— 看起来像「被拒绝」，
 #: 实际是「没想完就没 token 了」。
-DEFAULT_MAX_TOKENS = 4000
+DEFAULT_MAX_TOKENS = 8192
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -187,7 +187,13 @@ def _jailbreak_text(original: str, attempt: int,
     if attempt - 1 < len(techs):
         t = techs[attempt - 1]
         try:
-            return t.transform(original), 1, t.name
+            # **必须传 model** —— pliny_vendor 靠它挑厂商专用模板。
+            # 不传就拿不到（它只能返回原文），等于这个技术白挂。
+            try:
+                return t.transform(original, model=model), 1, t.name
+            except TypeError:
+                # 不支持 model 参数的技术（大多数是纯字符串变换）
+                return t.transform(original), 1, t.name
         except Exception:                       # noqa: BLE001
             return original, 1, t.name
 
