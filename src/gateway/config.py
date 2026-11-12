@@ -55,9 +55,18 @@ class StorageConfig(BaseModel):
 
 
 class ModeConfig(BaseModel):
-    """模式层默认值。"""
+    """模式层默认值。
+
+    `fallback` 默认 **strict** —— 用户没说要降级就不许降。
+    这不是保守，是「指定的东西没给到必须让人知道」：静默降级会让调用方
+    拿着一张 gpt-4o 的 prompt 收到 deepseek-chat 的答案而不自知。
+
+    fallback_same_model  允许换家（同型号，参数语义一致，用户要的东西没变）
+    fallback_any_model   允许换型号（能力变了，必须带告警头）
+    """
 
     default: Literal["auto", "manual"] = "auto"
+    fallback: Literal["strict", "fallback_same_model", "fallback_any_model"] = "strict"
 
 
 class RouteConfig(BaseModel):
