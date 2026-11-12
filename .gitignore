@@ -13,7 +13,12 @@ venv/
 .ruff_cache/
 
 # ── 运行数据（含密钥/账号，绝不入库）─────────────────────────
-data/
+# ★ 必须写成 /data/（只匹配仓库根目录），不能写 data/
+#   写 data/ 会匹配**任何层级**的 data 目录，把
+#   src/gateway/jailbreak/data/pliny/（破甲模板 37 个 .mkd）一起忽略掉。
+#   后果极隐蔽：代码正常但模板读不到，pliny_vendor 静默失效，
+#   只表现为「破甲效果突然变差」，不报错。
+/data/
 *.db
 *.db-wal
 *.db-shm
