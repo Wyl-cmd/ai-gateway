@@ -1,0 +1,92 @@
+# ═══════════════════════════════════════════════════════════════
+# AI 网关配置模板
+# 复制成 config.toml 再改（config.toml 已被 .gitignore 忽略）
+#
+# ★ 密钥不写在这个文件里 —— 走环境变量（见下方 key_env）
+#   这样配置文件可以随便传、进仓库、发给人看，不会泄露 key
+#
+# ★ TOML 语法提醒：键值属于「最近的上方表头」。
+#   所以顶层字段（auth_keys）必须写在任何 [表头] 之前。
+# ═══════════════════════════════════════════════════════════════
+
+# ── 网关自己的认证密钥（顶层，必须在所有 [表头] 之前）──────
+# 客户端请求要带：Authorization: Bearer <这里的一个值>
+# 可以配多个（给不同设备用不同的，泄了一个吊销一个）
+auth_keys = ["change-me-to-something-random"]
+
+[server]
+# 0.0.0.0 = 局域网全部设备可访问（手机、平板、其他电脑）
+# 只给本机用就改回 127.0.0.1
+host = "0.0.0.0"
+port = 8787
+
+[storage]
+db_path = "gateway.db"
+
+[mode]
+# auto    = 按权重自动选供应商（响应头会标明实际用的哪个模型）
+# manual  = 锁定到指定模型
+mode = "auto"
+# strict              = 目标模型不可用就报错
+# fallback_same_model = 换供应商上同型号（默认，参数语义完全一致）
+# fallback_any_model  = 跨型号降级（会改变输出风格，谨慎）
+fallback = "fallback_same_model"
+
+[route]
+rotate_accounts = true       # 账号轮巡（永远开）
+switch_provider = true       # 供应商切换
+downgrade_model = false      # 跨型号降级（默认关）
+
+[jailbreak]
+# 破甲默认开。实测（DeepSeek，「写游戏外挂给完整代码」）：
+#   关掉 → 640 字拒绝
+#   开着 → 8208 字，完整 C++ 工程骨架
+enabled = true
+start_level = 1
+# 最大值 4。L1=规则变形/模板（零成本）L2=编码类 L3=提示工程 L4=PAIR/TAP 迭代搜索
+max_level = 4
+# 单次破甲阶梯的时间上限（毫秒）。超时返回已拿到的最好结果
+ladder_timeout_ms = 12000
+
+# ── 供应商 ──────────────────────────────────────────────────
+# kind: openai（含所有 OpenAI 兼容接口）/ anthropic / gemini / custom
+# key_env: 填**环境变量名**，不是密钥本身
+
+[[providers]]
+name = "deepseek"
+kind = "openai"
+base_url = "https://api.deepseek.com"
+enabled = true
+
+[[providers.accounts]]
+key_id = "key1"
+key_env = "DEEPSEEK_KEY_1"
+quota = "paid"
+
+# 第二个账号（没有就删掉）—— 配额耗尽自动切过去
+# [[providers.accounts]]
+# key_id = "key2"
+# key_env = "DEEPSEEK_KEY_2"
+# quota = "paid"
+
+# 计费（可选，用于预算统计）
+# [[providers.pricing]]
+# model = "deepseek-chat"
+# input_per_1k = 0.00014
+# output_per_1k = 0.00028
+
+# 加别的供应商再写一个 [[providers]] 块
+# [[providers]]
+# name = "openai"
+# kind = "openai"
+# base_url = "https://api.openai.com/v1"
+# enabled = true
+#
+# [[providers.accounts]]
+# key_id = "oa1"
+# key_env = "OPENAI_KEY_1"
+
+# ── 预算（可选）───────────────────────────────────────────────
+# [budget]
+# daily_tokens = 2000000
+# monthly_tokens = 40000000

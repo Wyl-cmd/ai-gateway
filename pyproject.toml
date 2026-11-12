@@ -32,6 +32,12 @@ gateway = "gateway.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# 破甲模板必须打进包里 —— 不声明的话 pip install 之后
+# jailbreak/data/pliny/*.mkd 不会被复制，pliny_vendor 技术直接失效，
+# 而且症状很隐蔽：只表现为「破甲效果突然变差」，不报错。
+[tool.setuptools.package-data]
+"gateway.jailbreak" = ["data/pliny/*.mkd"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"

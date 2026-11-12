@@ -49,8 +49,26 @@ from dataclasses import dataclass, field
 from .technique import Cost, Lang, Level, Technique
 
 
-#: 仓库路径（不在包内，从 refs 读；打包发行时需要一并带上）
-REFS = pathlib.Path(__file__).resolve().parents[3] / "refs" / "L1B3RT4S"
+#: 模板目录查找顺序。**包内优先** —— 打包发行后 refs/ 不存在，必须能自带运行。
+#:
+#: 只带了 37 个厂商模板（380 KB），排除了两个巨型 many-shot 文件：
+#:   TOKEN80M8.mkd 22.9 MB ／ TOKENADE.mkd 1.8 MB  —— 占全库 94% 体积，
+#:   是超长 many-shot 样本，不是按厂商分的模板，当前的按厂商匹配逻辑用不上。
+_CANDIDATES = (
+    pathlib.Path(__file__).resolve().parent / "data" / "pliny",   # 包内（发行版）
+    pathlib.Path(__file__).resolve().parents[3] / "refs" / "L1B3RT4S",  # 开发期
+)
+
+
+def _template_dir() -> pathlib.Path | None:
+    for d in _CANDIDATES:
+        if d.is_dir() and any(d.glob("*.mkd")):
+            return d
+    return None
+
+
+#: 兼容旧名字（外部可能 import 了 REFS）
+REFS = _CANDIDATES[1]
 
 
 @dataclass
@@ -145,9 +163,10 @@ def load_all() -> list[PlinyTemplate]:
         return _CACHE
 
     out: list[PlinyTemplate] = []
-    if REFS.exists():
+    base = _template_dir()
+    if base is not None:
         for f, vendor in _VENDOR_FILES.items():
-            p = REFS / f
+            p = base / f
             if p.exists():
                 out.extend(_parse_mkd(p, vendor))
     _CACHE = out
