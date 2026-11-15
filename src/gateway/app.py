@@ -430,7 +430,7 @@ def _sse(obj: dict) -> str:
 # 应用
 # ═══════════════════════════════════════════════════════════════
 def create_app(deps: GatewayDeps) -> FastAPI:
-    app = FastAPI(title="AI 路由网关", version="0.1.1", docs_url=None, redoc_url=None)
+    app = FastAPI(title="AI 路由网关", version="0.1.2", docs_url=None, redoc_url=None)
 
     def _auth_token(request: Request, proto: str) -> str | None:
         """从请求里取鉴权 token。Anthropic 的 x-api-key 与 Bearer 等价
