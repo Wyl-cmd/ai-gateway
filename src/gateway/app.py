@@ -74,13 +74,15 @@ from .routing.pool import Candidate, Pool, RoutingPolicy
 #: 不该被无限重试，用户等 30 秒拿到「还是拒绝」比等 5 分钟好。
 MAX_JAILBREAK_ATTEMPTS = 6
 
-#: 调用方没给 max_tokens 时的默认值。
+#: max_tokens **透传不代管**（2026-11-15 定性，用户原则：网关只是通道）：
 #:
-#: **必须给足**：实测 deepseek-flash 这类思考模型，一次普通问答 reasoning 就要
-#: 200~400 tokens，破甲变形（Base64/模板）后会到 1000+。给 900 的结果是
-#: reasoning 吃光预算、content 为空、finish_reason=length —— 看起来像「被拒绝」，
-#: 实际是「没想完就没 token 了」。
-DEFAULT_MAX_TOKENS = 8192
+#: 生成参数（max_tokens / temperature / top_p / stop）一律原样透传 ——
+#: 请求带了就传给上游，没带就**不发送该字段**，上游 API 用它自己的默认值，
+#: 行为与直连该 API 完全一致。网关曾注入 8192 兜底思考模型的截断坑
+#: （reasoning 吃光预算 → content 空 → finish_reason=length，看似拒绝），
+#: 但那是「网关替用户做决定」；现在截断仍会**如实识别并标注**（见两处
+#: truncation 分支），只是不再代为放大预算。Anthropic 入口的 max_tokens
+#: 必填是**协议规范**（正版同样要求），不属于代管。
 
 #: 流式迭代哨兵（to_thread(next, it, 哨兵) 区分「迭代完」与 None）
 _NO_MORE = object()
@@ -320,8 +322,10 @@ def _stream_ladder_worker(
                 "model": cand.model,
                 "messages": _replace_last_user(messages, text),
                 "stream": True,
-                "max_tokens": params.get("max_tokens") or DEFAULT_MAX_TOKENS,
             }
+            # max_tokens 透传不代管：带了原样传，没带不发送（上游用自己默认）
+            if params.get("max_tokens") is not None:
+                unified["max_tokens"] = params["max_tokens"]
             if params.get("temperature") is not None:
                 unified["temperature"] = params["temperature"]
             if params.get("top_p") is not None:
@@ -362,7 +366,7 @@ def _stream_ladder_worker(
             if not content.strip() and fr == "length":
                 trace.add_error(
                     "被 max_tokens 截断（不是拒绝）：content 为空但 finish_reason=length，"
-                    "重试无意义 —— 需要调大 max_tokens")
+                    "重试无意义 —— 需要更长输出请在请求里带更大的 max_tokens（网关不代为放大）")
                 if d.memory is not None:
                     try:
                         d.memory.record_attempt(
@@ -588,9 +592,9 @@ def create_app(deps: GatewayDeps) -> FastAPI:
                     unified["top_p"] = params["top_p"]
                 if params.get("stop"):
                     unified["stop"] = params["stop"]
-                # 没给就用默认值 —— 不给 max_tokens 时上游默认可能很小，
-                # 思考模型会直接截断（见 DEFAULT_MAX_TOKENS 的注释）
-                unified["max_tokens"] = params.get("max_tokens") or DEFAULT_MAX_TOKENS
+                # max_tokens 透传不代管：带了原样传，没带不发送（上游用自己默认）
+                if params.get("max_tokens") is not None:
+                    unified["max_tokens"] = params["max_tokens"]
 
                 t_up = time.perf_counter()
                 try:
@@ -640,7 +644,7 @@ def create_app(deps: GatewayDeps) -> FastAPI:
                         and result.get("finish_reason") == "length"):
                     trace.add_error(
                         "被 max_tokens 截断（不是拒绝）：content 为空但 finish_reason=length，"
-                        "重试无意义 —— 需要调大 max_tokens"
+                        "重试无意义 —— 需要更长输出请在请求里带更大的 max_tokens（网关不代为放大）"
                     )
                     # 截断也要记战绩：不然 J5 永远学不到「这个技术会让模型
                     # 想太久导致超长」，下次还会选它
@@ -853,8 +857,9 @@ def create_app(deps: GatewayDeps) -> FastAPI:
             unified: dict[str, Any] = {
                 "model": cand.model, "messages": messages,
                 "stream": True,
-                "max_tokens": params.get("max_tokens") or DEFAULT_MAX_TOKENS,
             }
+            if params.get("max_tokens") is not None:
+                unified["max_tokens"] = params["max_tokens"]
             if params.get("temperature") is not None:
                 unified["temperature"] = params["temperature"]
             if params.get("top_p") is not None:

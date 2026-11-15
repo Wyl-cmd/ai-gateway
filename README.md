@@ -149,9 +149,12 @@ ladder_timeout_ms = 12000
 **配额耗尽**只跳过该账号（同 provider 其他 key 仍可用）；
 **服务故障**才跳过整个 provider。
 
-**`DEFAULT_MAX_TOKENS = 8192`** —— 思考模型 reasoning 能吃 11,792 字，
-给 3000 的结果是 `finish_reason=length` + content 空，看起来像「被拒绝」，
-实际是「没想完就没 token 了」。这是踩过最深的坑。
+**生成参数透传不代管** —— 网关只是通道：`max_tokens` / `temperature` /
+`top_p` / `stop` 请求带了就原样传给上游，没带就**不发送该字段**（上游 API
+用它自己的默认值，行为与直连完全一致）。思考模型的 reasoning 吃光预算时
+表现为 `finish_reason=length` + content 空（看似「被拒绝」实为「没想完」），
+网关会如实标注这次截断且不烧重试；需要更长输出请带更大的 `max_tokens`。
+唯一例外：Anthropic 协议的 `max_tokens` 必填是正版协议规范，不属于代管。
 
 ## 三家都没做的、我们做了的
 

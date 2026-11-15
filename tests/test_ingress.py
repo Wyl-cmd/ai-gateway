@@ -20,7 +20,7 @@ import httpx
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from gateway.app import DEFAULT_MAX_TOKENS, create_app, GatewayDeps
+from gateway.app import create_app, GatewayDeps
 from gateway.observability.tokens import TokenMeter
 from gateway.providers.base import ProviderError
 from gateway.providers.openai import OpenAIAdaptor
@@ -269,17 +269,14 @@ async def test_流式逐块透传():
 # ④a 不给 max_tokens 时要给足默认值（思考模型必需）
 # ═══════════════════════════════════════════════════════════════
 @pytest.mark.asyncio
-async def test_没给_max_tokens_时用足够大的默认值():
-    """实测：deepseek-flash 一次普通问答 reasoning 要 200~400 tokens，
-    破甲变形后到 1000+。不给 max_tokens 时上游默认可能很小，
-    思考模型会直接截断，表现成「内容为空」。
-
-    这条守的就是「网关必须主动给一个够大的值」。
-    """
+async def test_没给_max_tokens_时不注入_留给上游默认():
+    """网关是管道，不替调用方决定输出预算：请求里没带 max_tokens
+    就不向上游发送该字段，行为与直连上游 API 完全一致。
+    （思考模型截断是上游默认值的事，网关只如实标注截断，不代为放大。）"""
     seen = {}
 
     def responder(i, unified):
-        seen["max_tokens"] = unified.get("max_tokens")
+        seen["has_max_tokens"] = "max_tokens" in unified
         return {"content": "答案", "finish_reason": "stop", "usage": {}}
 
     deps, _ = make_deps(responder)
@@ -290,8 +287,7 @@ async def test_没给_max_tokens_时用足够大的默认值():
                                "messages": [{"role": "user", "content": "hi"}]},
                          headers=HDR)
     assert r.status_code == 200
-    assert seen["max_tokens"] >= 2000, \
-        f"默认 max_tokens={seen['max_tokens']} 太小，思考模型会被截断"
+    assert seen["has_max_tokens"] is False, "网关不该替调用方注入 max_tokens"
 
 
 @pytest.mark.asyncio
@@ -783,17 +779,17 @@ async def test_流式_破甲关闭_真直通不变形():
 
 
 @pytest.mark.asyncio
-async def test_流式_没给max_tokens_用默认8192():
+async def test_流式_没给max_tokens_不注入():
     seen = {}
 
     def resp(i, u):
-        seen["max_tokens"] = u.get("max_tokens")
+        seen["has_max_tokens"] = "max_tokens" in u
         return ANSWER_EVENTS
 
     deps, _ = _stream_deps(resp, jailbreak=False)
     async with client_for(deps) as c:
         await _stream_post(c)
-    assert seen["max_tokens"] == DEFAULT_MAX_TOKENS
+    assert seen["has_max_tokens"] is False, "流式同样不注入 max_tokens"
 
 
 @pytest.mark.asyncio
