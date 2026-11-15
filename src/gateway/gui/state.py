@@ -196,3 +196,19 @@ def route_display_from_trace(d: dict) -> RouteDisplay:
         prompt_tokens=int(usage.get("prompt_tokens", 0) or 0),
         completion_tokens=int(usage.get("completion_tokens", 0) or 0),
     )
+
+
+def endpoint_lines(host: str, port: int) -> list[tuple[str, str, str]]:
+    """主页「接口端点」卡的数据 —— 多协议同时在线，无需切换。
+
+    返回 (协议名, 完整 URL, 鉴权方式)。监听 0.0.0.0 时展示为 127.0.0.1
+    （0.0.0.0 是「所有网卡」，不是能敲进客户端的地址）。
+    """
+    base = f"http://{host if host != '0.0.0.0' else '127.0.0.1'}:{port}"
+    return [
+        ("OpenAI 协议", f"{base}/v1/chat/completions",
+         "Authorization: Bearer <网关密钥>"),
+        ("Anthropic 协议", f"{base}/v1/messages",
+         "x-api-key: <网关密钥>"),
+        ("模型清单", f"{base}/v1/models", "GET"),
+    ]

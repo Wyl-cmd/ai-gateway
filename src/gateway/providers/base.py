@@ -235,13 +235,22 @@ class Adaptor(abc.ABC):
         return out
 
     def transform_delta(self, raw: dict) -> dict:
-        """把上游单个流式事件转成 {delta, finish_reason}。默认按 OpenAI 格式。"""
+        """把上游单个流式事件转成 {delta, finish_reason}。默认按 OpenAI 格式。
+
+        usage 块（stream_options.include_usage 的最终 chunk，choices 为空）
+        不能丢 —— 网关的流式响应要能把这个 usage 转给客户端。
+        """
         choices = raw.get("choices") or []
         if not choices:
-            return {}
+            usage = raw.get("usage")
+            return {"usage": usage} if usage else {}
         c0 = choices[0]
         delta = (c0.get("delta") or {}).get("content") or ""
-        return {"delta": delta, "finish_reason": c0.get("finish_reason")}
+        out = {"delta": delta, "finish_reason": c0.get("finish_reason")}
+        # 有些上游把 usage 附在最后一个内容块上而不是独立块
+        if raw.get("usage"):
+            out["usage"] = raw["usage"]
+        return out
 
     # ── 发请求部分（G10 端到端才会真打）──
     def chat(self, unified: dict) -> dict:

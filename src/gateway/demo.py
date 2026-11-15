@@ -54,6 +54,27 @@ def fake_upstream(adaptor, unified):
     }
 
 
+def fake_stream(adaptor, unified):
+    """假上游流式版：与非流式 fake_upstream 同一套判断。
+
+    第一次（原样问）回拒绝话术；变形后（重试）逐片回正常答案，
+    结尾带 usage 块 —— 让 demo 能展示「流式下的破甲升级 + 标准帧」。
+    """
+    text = unified["messages"][-1]["content"]
+    original_marker = "你好，请介绍一下你自己"
+    if text.strip() == original_marker:
+        yield {"delta": "I'm sorry, but I can't help with that.",
+               "finish_reason": None}
+        yield {"delta": "", "finish_reason": "stop"}
+        return
+    for piece in ("[变形后", "拿到答案] ", "收到的变形文本前 60 字：",
+                  text[:60], "…"):
+        yield {"delta": piece}
+    yield {"delta": "", "finish_reason": "stop"}
+    yield {"usage": {"prompt_tokens": 45, "completion_tokens": 30,
+                     "total_tokens": 75}}
+
+
 def build() -> GatewayDeps:
     pool = Pool()
     cands = [
@@ -73,6 +94,7 @@ def build() -> GatewayDeps:
         meter=TokenMeter(),
         api_key=DEMO_KEY,
         call_fn=fake_upstream,          # ← 接真实上游时把它设成 None
+        stream_fn=fake_stream,          # ← 同上
         jailbreak_enabled=True,
         mode="auto",
         trace_json_header=True,

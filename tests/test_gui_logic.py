@@ -419,3 +419,28 @@ def test_应用图标资源存在且可加载():
     p = app_icon_path()
     assert p is not None and Path(p).is_file(), "assets/ai-gateway.ico 不存在"
     assert not app_icon().isNull()
+
+
+# ═══════════════════════════════════════════════════════════════
+# ⑦ 接口端点卡（多协议同时在线，主页明示哪个端点是什么协议）
+# ═══════════════════════════════════════════════════════════════
+def test_接口端点行_本机回环():
+    from gateway.gui.state import endpoint_lines
+
+    rows = endpoint_lines("0.0.0.0", 8787)
+    labels = [r[0] for r in rows]
+    assert labels == ["OpenAI 协议", "Anthropic 协议", "模型清单"]
+    # 0.0.0.0 是监听地址不是访问地址 —— 展示成 127.0.0.1
+    assert rows[0][1] == "http://127.0.0.1:8787/v1/chat/completions"
+    assert rows[1][1] == "http://127.0.0.1:8787/v1/messages"
+    assert rows[2][1] == "http://127.0.0.1:8787/v1/models"
+    # 鉴权方式跟着协议走
+    assert "Bearer" in rows[0][2]
+    assert "x-api-key" in rows[1][2]
+
+
+def test_接口端点行_自定义监听地址原样展示():
+    from gateway.gui.state import endpoint_lines
+
+    rows = endpoint_lines("192.168.1.5", 9000)
+    assert rows[0][1] == "http://192.168.1.5:9000/v1/chat/completions"

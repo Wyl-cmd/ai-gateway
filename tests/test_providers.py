@@ -293,3 +293,31 @@ def test_adaptor_子类必须声明_name():
     assert AnthropicAdaptor().name == "anthropic"
     assert DeepSeekAdaptor().name == "deepseek"
     assert GeminiAdaptor().name == "gemini"
+
+
+# ═══════════════════════════════════════════════════════════════
+# 流式 delta：usage 块不能丢（stream_options.include_usage 的最终块
+# choices 为空只有 usage —— 之前被 transform_delta 直接丢弃）
+# ═══════════════════════════════════════════════════════════════
+def test_流式usage块_透传不丢():
+    from gateway.providers.openai import OpenAIAdaptor
+
+    a = OpenAIAdaptor()
+    ev = a.transform_delta({"usage": {"prompt_tokens": 11, "completion_tokens": 7}})
+    assert ev.get("usage") == {"prompt_tokens": 11, "completion_tokens": 7}
+
+
+def test_流式普通delta_不受影响():
+    from gateway.providers.openai import OpenAIAdaptor
+
+    a = OpenAIAdaptor()
+    ev = a.transform_delta({"choices": [{"delta": {"content": "hi"},
+                                         "finish_reason": None}]})
+    assert ev == {"delta": "hi", "finish_reason": None}
+
+
+def test_流式空块_还是空dict():
+    from gateway.providers.openai import OpenAIAdaptor
+
+    a = OpenAIAdaptor()
+    assert a.transform_delta({}) == {}

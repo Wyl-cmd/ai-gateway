@@ -234,6 +234,14 @@ class MainWindow(QMainWindow):
         slay.addWidget(self.listen_lab)
         outer.addWidget(status_card)
 
+        # ── 接口端点（多协议同时在线，主页明示哪个端点是什么协议）──
+        ep_card, elay = _card("接口端点（多协议同时在线，无需切换）")
+        self.endpoints_lab = QLabel()
+        self.endpoints_lab.setFont(MONO)
+        self.endpoints_lab.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        elay.addWidget(self.endpoints_lab)
+        outer.addWidget(ep_card)
+
         # ── 路由链 ──
         route_card, rlay = _card("本次路由（为什么走了这条路）")
         self.route_lab = QLabel("还没有请求")
@@ -392,6 +400,13 @@ class MainWindow(QMainWindow):
             f"监听 {self.host}:{self.port}   "
             f"局域网设备访问 http://<本机IP>:{self.port}"
         )
+
+        # 接口端点卡：每行「协议名  URL  鉴权」
+        from .state import endpoint_lines
+        self.endpoints_lab.setText("\n".join(
+            f"{name}  {url}\n    鉴权 {auth}" if auth != "GET"
+            else f"{name}  {url}"
+            for name, url, auth in endpoint_lines(self.host, self.port)))
 
         # 配置摘要（有后端才知道；无后端保持空）
         if self.deps is not None:

@@ -122,6 +122,11 @@ curl http://127.0.0.1:8787/v1/chat/completions ^
   -d "{\"model\":\"deepseek-chat\",\"messages\":[{\"role\":\"user\",\"content\":\"你好\"}]}"
 ```
 
+**双协议同时在线**（无需任何切换）：OpenAI 协议端点是
+`/v1/chat/completions`（Bearer 鉴权），Anthropic 协议端点是
+`/v1/messages`（`x-api-key` 鉴权），模型清单 `/v1/models`。
+GUI 主页的「接口端点」卡列出了全部地址，点开可直接复制。
+
 Linux/macOS 下反斜杠换成 `\`，或者用 PowerShell 的 `curl.exe`。
 
 ## 七、破甲（默认开）

@@ -7,6 +7,7 @@
 ```
 ✅ 全部完成。36 源文件 / 6,396 行 ｜ 18 测试文件 / 4,413 行 ｜ 369 passed
 ✅ config.toml → gateway serve / GUI 进程内服务，真实链路已接通
+✅ 双协议接入（OpenAI /v1/chat/completions + Anthropic /v1/messages），流式走破甲阶梯
 ✅ 破甲端到端实测成功（外挂问题 → 8,208 字完整 C++ 工程骨架）
 ✅ 局域网可访问 ｜ Windows 托盘 + Linux 窗口
 ```
@@ -39,14 +40,27 @@ Windows / Linux 行为一致。也兼容环境变量方式（`export DEEPSEEK_KE
 GUI 面板显示真实数据：账号池状态、每次请求的路由链、降级告警、统计；
 切 MANUAL 会出「锁定目标 + 降级策略」选择器，立即生效。
 
-调它跟调 OpenAI 一样：
+**双协议同时在线，按端点自动分流，无需任何切换**（定性照抄 New API）：
+
+| 端点 | 协议 | 鉴权 | 适配的客户端 |
+|---|---|---|---|
+| `/v1/chat/completions` | OpenAI | `Authorization: Bearer <key>` | ChatBox / Cherry Studio / OpenWebUI / openai-sdk |
+| `/v1/messages` | Anthropic | `x-api-key: <key>` 或 Bearer | Claude 系 SDK / 官方 anthropic-sdk |
+| `/v1/models` | 双形状 | Bearer 或 x-api-key | 客户端拉模型清单 |
 
 ```bash
-curl http://127.0.0.1:8787/v1/chat/completions \
-  -H "Authorization: Bearer 你设的网关密钥" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"deepseek-chat","messages":[{"role":"user","content":"你好"}]}'
+# OpenAI 协议
+curl http://127.0.0.1:8787/v1/chat/completions   -H "Authorization: Bearer 你设的网关密钥"   -H "Content-Type: application/json"   -d '{"model":"deepseek-chat","messages":[{"role":"user","content":"你好"}]}'
+
+# Anthropic 协议（同一批供应商/密钥/破甲，只是壳不同）
+curl http://127.0.0.1:8787/v1/messages   -H "x-api-key: 你设的网关密钥"   -H "anthropic-version: 2023-06-01"   -H "Content-Type: application/json"   -d '{"model":"deepseek-chat","max_tokens":1024,"messages":[{"role":"user","content":"你好"}]}'
 ```
+
+**流式语义（诚实说明）**：破甲关闭时 = 真·逐块直通；破甲开启时 =
+先完整拿到「通过拒绝检测的回答」再按标准帧回放（OpenAI：role 块 →
+内容块 → finish_reason 块 → usage 块 → [DONE]；Anthropic：message_start →
+content_block_delta → message_delta → message_stop）——拒绝检测必须先见
+全文，这是语义代价而非偷工。GUI 主页的「接口端点」卡会列出全部地址。
 
 ## 破甲：实测数据
 
@@ -84,7 +98,7 @@ bool AttachProcess(const wchar_t* procName) {
 
 ```
 ⓪ 模式层    AUTO / MANUAL —— 决定「谁来选路由」
-① 接入层    OpenAI 兼容 / Anthropic —— 协议分流
+① 接入层    OpenAI / Anthropic 双协议同时在线（URL 定格式，协议分流）
 ② 破甲层    27 种技术 × 4 级阶梯（含 39 条厂商专用模板）
 ③ 路由层    健康租约 + 失败分类 + rank_targets + 能力表
 ④ 转发层    provider adaptor（openai / anthropic / deepseek / gemini / aggregator）

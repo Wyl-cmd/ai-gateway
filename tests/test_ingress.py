@@ -20,7 +20,7 @@ import httpx
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from gateway.app import create_app, GatewayDeps
+from gateway.app import DEFAULT_MAX_TOKENS, create_app, GatewayDeps
 from gateway.observability.tokens import TokenMeter
 from gateway.providers.base import ProviderError
 from gateway.providers.openai import OpenAIAdaptor
@@ -659,3 +659,241 @@ async def test_适配器查找_账号键优先于型号键():
         r = await c.post("/v1/chat/completions", json=body(), headers=HDR)
     assert r.status_code == 200
     assert seen["key"] == "sk-2", "选了 k2 却用了别的账号的 key —— 轮巡就废了"
+
+
+
+
+# ═══════════════════════════════════════════════════════════════
+# ⑨ 流式重写：破甲阶梯 + OpenAI 流式标准
+# ═══════════════════════════════════════════════════════════════
+REFUSAL_EVENTS = [{"delta": "I'm sorry, but I can't help with that.",
+                   "finish_reason": None},
+                  {"delta": "", "finish_reason": "stop"}]
+ANSWER_EVENTS = [{"delta": "答"}, {"delta": "案"},
+                 {"delta": "", "finish_reason": "stop"},
+                 {"usage": {"prompt_tokens": 10, "completion_tokens": 5,
+                            "total_tokens": 15}}]
+
+
+def _stream_deps(resp, *, jailbreak=True, **extra):
+    """流式打桩：resp(call_index, unified) -> 事件列表。calls 记录每次 unified。"""
+    calls = []
+
+    def _unified_to_result(events):
+        deltas, fr, usage = [], None, None
+        for ev in events:
+            if ev.get("delta"):
+                deltas.append(ev["delta"])
+            fr = ev.get("finish_reason") or fr
+            usage = ev.get("usage") or usage
+        return {"content": "".join(deltas), "finish_reason": fr,
+                "usage": usage or {}}
+
+    def stream_fn(adaptor, unified):
+        calls.append(json.loads(json.dumps(unified)))   # 深拷贝防后续改动
+        yield from resp(len(calls), unified)
+
+    def call_fn(adaptor, unified):
+        calls.append(json.loads(json.dumps(unified)))
+        return _unified_to_result(resp(len(calls), unified))
+
+    pool = Pool()
+    cands = [Candidate(provider="fake", account="k1", model="gpt-4o")]
+    deps = GatewayDeps(
+        pool=pool, candidates=cands,
+        adaptors={("fake", "gpt-4o"): OpenAIAdaptor("http://up", "sk")},
+        call_fn=call_fn, stream_fn=stream_fn, meter=TokenMeter(),
+        api_key="test-key", jailbreak_enabled=jailbreak, **extra)
+    return deps, calls
+
+
+def _parse_sse(text: str) -> list:
+    """data: 行 → JSON 列表（[DONE] 转成字符串）。"""
+    out = []
+    for line in text.splitlines():
+        if line.startswith("data: "):
+            raw = line[6:]
+            out.append(raw.strip() if raw.strip() == "[DONE]"
+                       else json.loads(raw))
+    return out
+
+
+async def _stream_post(c, payload=None):
+    async with c.stream("POST", "/v1/chat/completions",
+                        json=payload or body(stream=True), headers=HDR) as r:
+        assert r.status_code == 200
+        headers = dict(r.headers)
+        text = "".join([chunk async for chunk in r.aiter_text()])
+    return headers, text
+
+
+@pytest.mark.asyncio
+async def test_流式_破甲升级后回放():
+    """L0 被拒 → L1 变形重试 → 成功内容按 SSE 回放，含完整标准帧。"""
+    deps, calls = _stream_deps(lambda i, u: REFUSAL_EVENTS if i == 1 else ANSWER_EVENTS)
+    async with client_for(deps) as c:
+        headers, text = await _stream_post(c)
+    frames = _parse_sse(text)
+
+    # 上游确实先收到原文、再收到变形后的 prompt —— 破甲在流式下真实生效
+    assert calls[0]["messages"][-1]["content"] == "你好"
+    assert calls[1]["messages"][-1]["content"] != "你好"
+    assert headers["x-gateway-jailbreak-level"] == "1"
+
+    # OpenAI 流式标准帧：role 首块 → 内容块 → finish_reason 块 → usage 块 → [DONE]
+    assert frames[0]["choices"][0]["delta"] == {"role": "assistant", "content": ""}
+    content = "".join(f["choices"][0]["delta"].get("content", "")
+                      for f in frames[1:-2] if f != "[DONE]" and f["choices"])
+    assert content == "答案"
+    fin = [f for f in frames if f != "[DONE]" and f["choices"]
+           and f["choices"][0]["finish_reason"]]
+    assert fin and fin[0]["choices"][0]["finish_reason"] == "stop"
+    usage_frames = [f for f in frames if f != "[DONE]" and f.get("usage")]
+    assert usage_frames and usage_frames[0]["usage"]["total_tokens"] == 15
+    assert frames[-1] == "[DONE]"
+    assert text.rstrip().endswith("[DONE]")
+
+
+@pytest.mark.asyncio
+async def test_流式_全部拒绝_回放最后一次内容():
+    deps, _calls = _stream_deps(lambda i, u: REFUSAL_EVENTS)
+    async with client_for(deps) as c:
+        headers, text = await _stream_post(c)
+    frames = _parse_sse(text)
+    content = "".join(f["choices"][0]["delta"].get("content", "")
+                      for f in frames if f != "[DONE]" and f["choices"])
+    assert "I'm sorry" in content          # 用户有权看到模型说了什么（与非流式一致）
+    assert frames[-1] == "[DONE]"
+
+
+@pytest.mark.asyncio
+async def test_流式_破甲关闭_真直通不变形():
+    """jb 关 = 真·逐 delta 直通（无缓冲无重试），上游收到原始 messages。"""
+    deps, calls = _stream_deps(lambda i, u: ANSWER_EVENTS, jailbreak=False)
+    async with client_for(deps) as c:
+        headers, text = await _stream_post(c)
+    assert len(calls) == 1
+    assert calls[0]["messages"][-1]["content"] == "你好"   # 原样
+    assert headers["x-gateway-jailbreak-level"] == "0"
+    frames = _parse_sse(text)
+    content = "".join(f["choices"][0]["delta"].get("content", "")
+                      for f in frames if f != "[DONE]" and f["choices"])
+    assert content == "答案"
+    assert [f for f in frames if f != "[DONE]" and f.get("usage")]
+
+
+@pytest.mark.asyncio
+async def test_流式_没给max_tokens_用默认8192():
+    seen = {}
+
+    def resp(i, u):
+        seen["max_tokens"] = u.get("max_tokens")
+        return ANSWER_EVENTS
+
+    deps, _ = _stream_deps(resp, jailbreak=False)
+    async with client_for(deps) as c:
+        await _stream_post(c)
+    assert seen["max_tokens"] == DEFAULT_MAX_TOKENS
+
+
+@pytest.mark.asyncio
+async def test_流式_截断不重试直接回放():
+    """finish_reason=length 且 content 空 = 没想完，不是拒绝 —— 不烧重试。"""
+    def resp(i, u):
+        return [{"delta": "", "finish_reason": "length"}]
+
+    deps, calls = _stream_deps(resp)
+    async with client_for(deps) as c:
+        headers, text = await _stream_post(c)
+    assert len(calls) == 1, "截断不该重试"
+    frames = _parse_sse(text)
+    fin = [f for f in frames if f != "[DONE]" and f["choices"]
+           and f["choices"][0]["finish_reason"]]
+    assert fin[0]["choices"][0]["finish_reason"] == "length"
+
+
+@pytest.mark.asyncio
+async def test_流式_on_request_done_带level与usage():
+    got = []
+    deps, _ = _stream_deps(lambda i, u: ANSWER_EVENTS if i > 1 else REFUSAL_EVENTS,
+                           on_request_done=got.append)
+    async with client_for(deps) as c:
+        await _stream_post(c)
+    assert len(got) == 1
+    assert got[0]["jailbreak_level"] == 1
+    assert got[0]["usage"]["total_tokens"] == 15
+
+
+@pytest.mark.asyncio
+async def test_流式_temperature透传():
+    seen = {}
+
+    def resp(i, u):
+        seen["temperature"] = u.get("temperature")
+        return ANSWER_EVENTS
+
+    deps, _ = _stream_deps(resp, jailbreak=False)
+    async with client_for(deps) as c:
+        await _stream_post(c, {"model": "gpt-4o", "stream": True,
+                               "temperature": 0.3,
+                               "messages": [{"role": "user", "content": "你好"}]})
+    assert seen["temperature"] == 0.3
+
+
+@pytest.mark.asyncio
+async def test_流式_上游故障_换账号级语义与非流式一致():
+    """quota 错误 → 换候选（非流式的既定语义），而不是耗在破甲上。"""
+    from gateway.providers.base import ProviderError
+
+    calls = []
+
+    def stream_fn(adaptor, unified):
+        calls.append(1)
+        if adaptor.api_key == "sk-1":            # k1 配额耗尽
+            raise ProviderError("insufficient quota", status=402)
+        yield from ANSWER_EVENTS                  # k2 正常
+
+    k1 = Candidate(provider="fake", account="k1", model="gpt-4o")
+    k2 = Candidate(provider="fake", account="k2", model="gpt-4o")
+    deps = GatewayDeps(
+        pool=Pool(), candidates=[k1, k2],
+        adaptors={("fake", "k1"): OpenAIAdaptor("http://up", "sk-1"),
+                  ("fake", "k2"): OpenAIAdaptor("http://up", "sk-2")},
+        stream_fn=stream_fn, meter=TokenMeter(), api_key="test-key",
+        jailbreak_enabled=False,
+    )
+    async with client_for(deps) as c:
+        r = await c.post("/v1/chat/completions", json=body(stream=True), headers=HDR)
+    assert r.status_code == 200
+    assert len(calls) == 2, "quota 应换下一个候选"
+    frames = _parse_sse(r.text)
+    content = "".join(f["choices"][0]["delta"].get("content", "")
+                      for f in frames if f != "[DONE]" and f["choices"])
+    assert content == "答案"
+
+
+# ═══════════════════════════════════════════════════════════════
+# ⑩ /v1/models
+# ═══════════════════════════════════════════════════════════════
+@pytest.mark.asyncio
+async def test_v1_models_openai形状():
+    deps, _ = _stream_deps(lambda i, u: ANSWER_EVENTS, jailbreak=False)
+    async with client_for(deps) as c:
+        r = await c.get("/v1/models", headers=HDR)
+    assert r.status_code == 200
+    j = r.json()
+    assert j["object"] == "list"
+    ids = [m["id"] for m in j["data"]]
+    assert "gpt-4o" in ids and all(m["object"] == "model" for m in j["data"])
+
+
+@pytest.mark.asyncio
+async def test_v1_models_anthropic形状_带x_api_key时():
+    deps, _ = _stream_deps(lambda i, u: ANSWER_EVENTS, jailbreak=False)
+    async with client_for(deps) as c:
+        r = await c.get("/v1/models", headers={**HDR, "x-api-key": "test-key",
+                                               "anthropic-version": "2023-06-01"})
+    assert r.status_code == 200
+    j = r.json()
+    assert j["data"][0]["type"] == "model"
+    assert "gpt-4o" in [m["id"] for m in j["data"]]
