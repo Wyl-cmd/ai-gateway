@@ -10,9 +10,13 @@
 #
 # 自检做什么（--verify）：
 #   ① 产物存在且可执行
-#   ② 能被 --help / --version 之类触发（不真起服务，避免占端口）
-#   ③ 关键数据文件确实打进包里 —— 破甲模板 37 个、schema.sql
-#      这两样漏了不会报错，只会静默失效，必须在构建期查出来
+#   ② 数据文件真的在包里（交给 packaging/verify_package.py，三态判定）：
+#        能跑 → 跑 `--diag` 看运行时真加载了几个模板（最强）
+#        跑不了（跨架构）→ 读 PyInstaller 包内清单数 .mkd / schema.sql（次强）
+#        都不行 → 明确打「未验证」，绝不假装通过
+#      为什么不用 strings 搜明文：onefile 的 datas 是压缩存放的（包内清单压缩标记=1），
+#      压缩字节流里没有明文，`strings | grep` 必然搜不到 → 恒误报（2026-11-15 修）。
+#   ③ 能正常启动（跑 `--diag`，无头安全、不占端口、不碰 GUI）
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -95,31 +99,43 @@ if [ "$VERIFY" -eq 1 ]; then
   # ① 能执行
   file "$OUT" | grep -q ELF && ok "产物是 ELF 可执行文件" || warn "产物不是 ELF（奇怪）"
 
-  # ② 数据文件真的在包里
-  #    onefile 模式下先解到临时目录，用 --debug 太吵，这里直接查二进制里有无特征串
-  if strings "$OUT" 2>/dev/null | grep -q "zw-enc2-v1"; then
-    ok "破甲模板内容在二进制里（找到 zw-enc2-v1 特征串）"
-  else
-    bad "二进制里找不到破甲模板特征串 —— pliny 模板可能没打进去！"
-    VERIFY_FAIL=1
-  fi
+  # ② 数据文件真的在包里 —— 交给 verify_package.py（Linux/Windows 同一套判据）
+  #
+  # 为什么不用 strings：
+  #   原来这里是 `strings "$OUT" | grep -q "zw-enc2-v1"` / `grep -qi "CREATE TABLE"`，
+  #   两个独立缺陷让它恒误报（2026-11-15 实测）：
+  #     ① `zw-enc2-v1` 在本项目里根本不存在（是另一个项目的串），全仓只有本脚本提到它
+  #     ② onefile 的 datas 是压缩存放的（包内清单压缩标记=1），
+  #        schema.sql 里 4 处 CREATE TABLE 在成品里 0 命中 —— 压缩字节流里没有明文
+  #   恒误报的后果不是「多按一次跳过」，是把人训练成忽略自检，将来真漏了也一样忽略。
+  #
+  # 为什么改判运行时：`--diag`（packaging/exe_entry.py）会真的把模板读一遍并写日志，
+  # 比「字节在不在包里」更接近实际可用性。跨架构跑不起来时才降级去读包内清单。
+  echo
+  dim "验证数据文件（--diag 运行时探针 → 包内清单 → 未验证）…"
+  $PY packaging/verify_package.py "$OUT" && VERIFY_RC=0 || VERIFY_RC=$?
+  case "$VERIFY_RC" in
+    0) ok "数据文件验证通过" ;;
+    1) bad "数据文件验证不通过 —— 见上面 ✗ 行的原因"; VERIFY_FAIL=1 ;;
+    *) warn "产物未能验证（既跑不起来也读不了包）—— 这既不是通过也不是失败" ;;
+  esac
 
-  if strings "$OUT" 2>/dev/null | grep -qi "CREATE TABLE"; then
-    ok "schema.sql 在二进制里（找到 CREATE TABLE）"
-  else
-    warn "二进制里没找到 CREATE TABLE —— schema.sql 可能没打进去"
-  fi
-
-  # ③ 能起来（--version 或 --help，绝不起服务）
-  dim "试着跑一下（10 秒超时，只验证解释器/依赖加载正常）…"
-  if timeout 10 "$OUT" --help >/dev/null 2>&1; then
-    ok "可执行文件能正常启动"
+  # ③ 能起来（`--diag` 是无头安全的真探针，绝不起服务、不碰 GUI）
+  #
+  # 原来这里是 `timeout 10 "$OUT" --help`，入口是 GUI（exe_entry → run_gui）且没有
+  # `--help` 分支 → Qt 找不到 xcb 就 SIGABRT(134) → 固定打一行「已中止 / 退出码 134」。
+  # 那是**环境造成的假警报**，和上面 strings 那两处同一性质：吵久了就没人看自检了。
+  # `--diag` 会在无显示器环境下正常跑完并退出（第 ② 项已经用它跑过一次，这里同样能用）。
+  dim "再确认一次能正常启动（--diag，10 秒超时，不占端口）…"
+  if timeout 10 "$OUT" --diag >/dev/null 2>&1; then
+    ok "可执行文件能正常启动并完成自检"
   else
     rc=$?
     if [ "$rc" -eq 124 ]; then
-      warn "10 秒超时（可能直接进了 GUI/服务模式，属正常）"
+      warn "10 秒超时没跑完（onefile 首次解包可能偏慢）"
     else
-      warn "退出码 $rc（若 exe_entry 无 --help 分支则属正常，看下面手动验证）"
+      bad "--diag 退出码 $rc —— 产物起来就崩，不能发布"
+      VERIFY_FAIL=1
     fi
   fi
 
