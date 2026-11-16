@@ -39,3 +39,6 @@ tmp/
 
 # ZCode 会话产物
 .zcode/
+
+# Windows 发行包下载目录（验证器用，56MB 二进制不入库）
+dist-win/
